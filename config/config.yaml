@@ -1,0 +1,96 @@
+# Hermes Agent config — copy to ~/.hermes/config.yaml
+#
+# This is now the live, Hermes-validated config pulled directly from a
+# working ~/.hermes/config.yaml (2026-07-14), after an earlier hand-authored
+# version caused an error in the Desktop app. Two things that version was
+# missing, now included below:
+#   - _config_version: a schema-version marker Hermes manages; a file
+#     without it is likely what triggered the Desktop app error.
+#   - custom_providers: a named-provider list, seemingly required by the
+#     Desktop app's model picker (which needs a label, not just a bare
+#     model.base_url) even though delegation/model work fine without it
+#     via the CLI alone.
+# Treat this file as Hermes-managed going forward — if you edit it by hand,
+# prefer `hermes dashboard` or letting Hermes itself write changes where
+# possible, since the exact schema (and _config_version) may shift between
+# releases.
+
+model:
+  provider: custom
+  default: mlx-community/gemma-4-26b-a4b-it-4bit
+  base_url: http://127.0.0.1:8081/v1
+  # api_key / context_length intentionally omitted — local unauthenticated
+  # endpoint, context auto-detected.
+
+# Subagent delegation — confirmed working via live log evidence (see
+# README.md §6): base_url is honored, subagents genuinely route to the
+# fast model on :8082, not a silent fallback to the primary.
+delegation:
+  model: mlx-community/gemma-4-e4b-it-4bit
+  base_url: http://127.0.0.1:8082/v1
+  max_concurrent_children: 3
+
+# Real Discord config shape (confirmed against cli-config.yaml.dist).
+discord:
+  require_mention: true
+  auto_thread: true
+  history_backfill: true
+  history_backfill_limit: 50
+  reactions: true
+
+_config_version: 33
+
+group_sessions_per_user: true
+
+# Named custom endpoint — mirrors the primary model above. Appears to be
+# needed for the Desktop app's UI (model picker), auto-populated when
+# the live config was generated. Keep in sync with model.base_url/default
+# if you ever change the primary endpoint.
+custom_providers:
+  - name: Local (127.0.0.1:8081)
+    base_url: http://127.0.0.1:8081/v1
+    model: mlx-community/gemma-4-26b-a4b-it-4bit
+
+# Mixture-of-Agents intentionally omitted. Confirmed absent from both the
+# installer's default template and this live config, and per
+# NousResearch/hermes-agent issue #38952 (open as of June 2026), MoA is
+# currently hardcoded to a fixed set of frontier models — not configurable
+# via config.yaml today.
+
+# ── Security ──────────────────────────────────────────────────────────
+# Secret redaction is ON by default — strings that look like API keys,
+# tokens, and passwords are masked in tool output, logs, and chat
+# responses before the model or user ever sees them. Set redact_secrets
+# to false to disable (e.g. when developing the redactor itself).
+# tirith pre-exec scanning is enabled by default when the tirith binary
+# is available. Configure via security.tirith_* keys or env vars
+# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
+#
+# security:
+#   redact_secrets: true
+#   tirith_enabled: true
+#   tirith_path: "tirith"
+#   tirith_timeout: 5
+#   tirith_fail_open: true
+
+# ── Fallback Model ────────────────────────────────────────────────────
+# Automatic provider failover when primary is unavailable.
+# Uncomment and configure to enable. Triggers on rate limits (429),
+# overload (529), service errors (503), or connection failures.
+#
+# Supported providers:
+#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
+#   openai-codex (OAuth — hermes auth) — OpenAI Codex
+#   nous         (OAuth — hermes auth) — Nous Portal
+#   zai          (ZAI_API_KEY)         — Z.AI / GLM
+#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
+#   minimax      (MINIMAX_API_KEY)     — MiniMax
+#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
+#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
+#
+# For custom OpenAI-compatible endpoints, add base_url and key_env.
+#
+# fallback_model:
+#   provider: openrouter
+#   model: anthropic/claude-sonnet-4
