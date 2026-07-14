@@ -159,9 +159,20 @@ hermes gateway start     # installs + starts its own launchd service if not alre
 hermes gateway status    # confirm supervision status
 ```
 
-If you used `start-mlx-servers.sh` (step 3) to test manually first, stop those foreground/background processes before bootstrapping the MLX LaunchAgents, to avoid two processes fighting over the same port:
+If you used `start-mlx-servers.sh` (step 3) to test manually first, stop those unmanaged foreground/background processes before bootstrapping the MLX LaunchAgents, to avoid two processes fighting over the same port. Since they aren't under launchd yet, plain `pkill` is correct here:
 ```bash
 pkill -f 'mlx_lm.server'
+```
+
+**Once a server is running under a LaunchAgent, don't use `pkill`/`kill` to stop it** — `KeepAlive: true` means launchd immediately respawns anything you kill this way, which just looks like the kill silently failed. Use `launchctl bootout` instead, which properly unloads it from supervision first:
+```bash
+launchctl bootout gui/$(id -u)/com.mlx-fast
+launchctl bootout gui/$(id -u)/com.mlx-primary
+```
+To restart after a `bootout`, re-bootstrap:
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mlx-fast.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mlx-primary.plist
 ```
 
 ### 9. Verify
@@ -206,7 +217,7 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 | Discord bot fails to connect: `discord.errors.PrivilegedIntentsRequired` in `gateway.error.log` | One or more of the three privileged intents (Presence, Server Members, Message Content) isn't enabled in the Developer Portal | Enable all three in the Bot tab, confirm it saved, then `hermes gateway restart` |
 | Discord bot online and connected, but never replies to messages | `discord.require_mention: true` is the default — plain messages without an @mention are silently ignored, by design | @mention the bot explicitly, or set `discord.free_response_channels` for a channel where you don't want to |
 | Port 8081 or 8082 not responding | `mlx_lm.server` process not running, or LaunchAgent not loaded | Check `~/Library/Logs/mlx-primary.log` / `mlx-fast.log`; `launchctl list \| grep mlx` to confirm the LaunchAgents are loaded |
-| Two `mlx_lm.server` processes both trying to bind the same port | Manually ran `start-mlx-servers.sh` while the LaunchAgents were also active | `pkill -f 'mlx_lm.server'`, then let the LaunchAgents restart them cleanly, or use only one method at a time |
+| Two `mlx_lm.server` processes both trying to bind the same port (`Address already in use`, possibly with a repeated crash-loop and climbing `runs` count in `launchctl print`) | An unmanaged process from `start-mlx-servers.sh` is still holding the port while a LaunchAgent is also trying to bind it | `launchctl bootout gui/$(id -u)/com.mlx-fast` (or `com.mlx-primary`) to stop the managed one cleanly, `pkill -f 'mlx_lm.server'` to clear any remaining unmanaged strays, confirm nothing holds the port with `lsof -i :8082`, then re-`bootstrap`. Plain `pkill`/`kill` alone won't work once a LaunchAgent has taken it over — `KeepAlive` just respawns it immediately |
 | Hermes tool calls fail / malformed JSON (and `mlx-lm` is already 0.31.3+) | Model too small or not tool-calling-tuned | Confirm you're on `gemma-4-26b-a4b-it-4bit` or `gemma-4-e4b-it-4bit`, not an unrelated small model |
 | Gateway doesn't survive reboot | LaunchAgent not loaded, or the MLX servers weren't ready yet at login | Confirm `launchctl bootstrap` succeeded for both MLX plists and `hermes gateway status` shows the gateway supervised |
 | Subagents use the primary model instead of the fast one | `delegation:` isn't copied to `~/.hermes/config.yaml`, or `mlx-fast`'s server (`:8082`) isn't running | Check the block is present in `~/.hermes/config.yaml` and `curl http://127.0.0.1:8082/v1/models` responds |
