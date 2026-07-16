@@ -193,6 +193,10 @@ Nous Research also ships a native macOS app ("Hermes Desktop") — not covered b
 - **Status**: public preview as of this writing (shipped June 2026) — treat with a bit more caution than the CLI until it matures.
 - Adds: a native chat window with streaming tool output, a file browser pane, side-by-side previews of web pages/files/tool output, and voice input.
 
+**Known limitation: Desktop does not reliably apply `terminal.backend: docker`.** With `terminal:` fully and correctly configured in `~/.hermes/config.yaml` (§11), a Desktop session asked to read a Docker-mounted path fell back to running the command directly on the host instead — no container was created, no error was shown to the user, and the model simply reported the path as not found (having actually listed the real host root directory). The same request via `hermes chat -q` and via the Discord gateway both worked correctly and created the sandbox container as expected, confirming the config itself is correct and the gap is specific to Desktop. Nous Research's own issue tracker documents at least one other case of Desktop's Docker-backend launch path diverging from the CLI/gateway's, so this looks like a real product gap rather than a one-off misconfiguration.
+
+**Until this is fixed upstream, don't rely on Desktop for anything that needs the sandboxed corpus/deliverables setup in §11 — use `hermes chat` or the Discord gateway instead.** Desktop remains fine for everything that doesn't require the Docker terminal backend.
+
 ### 11. Subagent filesystem and shell access
 
 By default, Hermes's Docker terminal backend doesn't expose any host filesystem to subagents — everything is opt-in via `terminal.docker_volumes`. This is what makes it possible to give different directories different trust levels:
@@ -209,6 +213,8 @@ terminal:
 ```
 
 Fill in real host paths before use — the ones in `config/config.yaml` are placeholders.
+
+**Verify via CLI or Discord, not Desktop** — see §10's known limitation above.
 
 **How the enforcement actually works:** every terminal, file, and execute call — from the primary agent or any `delegate_task` subagent — routes through this one Docker container. The read-only vs. read-write split is enforced by the mount itself (`:ro` vs. no suffix), at the kernel level, not by which `toolsets` a given delegation call was given. A subagent can't write to a `:ro`-mounted path no matter what it attempts.
 
@@ -248,6 +254,7 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 | Subagents use the primary model instead of the fast one | `delegation:` isn't copied to `~/.hermes/config.yaml`, or `mlx-fast`'s server (`:8082`) isn't running | Check the block is present in `~/.hermes/config.yaml` and `curl http://127.0.0.1:8082/v1/models` responds |
 | Subagents seem slower than expected under 3-way concurrency | Expected — continuous batching trades some per-request latency for overall throughput (§5) | Not a bug; re-run `concurrency-test.sh` if the slowdown seems disproportionate |
 | Subagent reports a source document path doesn't exist, but it's clearly on the host | Tried to unify scattered directories with symlinks before mounting — Docker bind-mounts don't follow a symlink to a target outside the mounted directory | Mount each real source directory individually in `terminal.docker_volumes` (§11), not a directory of symlinks pointing elsewhere |
+| Sandboxed path request in Hermes Desktop reports "not found," but the same request via `hermes chat` or Discord works fine | Desktop doesn't reliably apply `terminal.backend: docker` — falls back to running on the host with no error shown (§10) | Use `hermes chat` or the Discord gateway for anything needing the Docker sandbox, until this is fixed upstream |
 
 ## Security notes
 
