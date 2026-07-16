@@ -38,6 +38,39 @@ discord:
   history_backfill_limit: 50
   reactions: true
 
+# Sandboxed filesystem + shell access for subagents. All terminal, file,
+# and execute calls (from the primary and any delegate_task subagent)
+# route through this one Docker container, so the mount permissions below
+# are what actually enforce read-only vs. read-write — not which toolsets
+# a given delegate_task call was given.
+terminal:
+  backend: docker
+  docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
+
+  docker_volumes:
+    # Read-only source documents — one line per directory. Docker's
+    # kernel-level :ro mount blocks writes regardless of what any
+    # subagent attempts.
+    - "/path/to/host/docs-collection-1:/corpus/collection-1:ro"
+    - "/path/to/host/docs-collection-2:/corpus/collection-2:ro"
+    # - "/path/to/host/docs-collection-3:/corpus/collection-3:ro"   # uncomment for a third
+
+    # Deliverables — read-write, persistent across sessions/projects/chats.
+    # Persistence here is automatic (plain host directory bind mount),
+    # independent of container_persistent below.
+    - "/path/to/host/hermes-deliverables:/workspace"
+
+  # Files written to /workspace come out owned by your host user instead
+  # of root. Only works with the default docker_image above (or plain
+  # Debian/Ubuntu-based images) — not with Hermes's own bundled image,
+  # which needs to start as root internally.
+  docker_run_as_host_user: true
+
+  container_persistent: true   # keep /workspace state across sessions
+  container_cpu: 2
+  container_memory: 5120       # MB
+  container_disk: 51200        # MB
+
 _config_version: 33
 
 group_sessions_per_user: true
@@ -74,7 +107,9 @@ custom_providers:
 #   tirith_fail_open: true
 
 # ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
+# Automatic provider failover when primary is unavailable. Real key is
+# `fallback_model:` (singular) — corrects an earlier wrong guess in this
+# repo's history (`fallback_providers:` / `fallback:` were never real).
 # Uncomment and configure to enable. Triggers on rate limits (429),
 # overload (529), service errors (503), or connection failures.
 #

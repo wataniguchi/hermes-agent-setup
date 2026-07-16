@@ -193,6 +193,31 @@ Nous Research also ships a native macOS app ("Hermes Desktop") — not covered b
 - **Status**: public preview as of this writing (shipped June 2026) — treat with a bit more caution than the CLI until it matures.
 - Adds: a native chat window with streaming tool output, a file browser pane, side-by-side previews of web pages/files/tool output, and voice input.
 
+### 11. Subagent filesystem and shell access
+
+By default, Hermes's Docker terminal backend doesn't expose any host filesystem to subagents — everything is opt-in via `terminal.docker_volumes`. This is what makes it possible to give different directories different trust levels:
+
+```yaml
+terminal:
+  backend: docker
+  docker_volumes:
+    - "/path/to/host/docs-collection-1:/corpus/collection-1:ro"
+    - "/path/to/host/docs-collection-2:/corpus/collection-2:ro"
+    - "/path/to/host/hermes-deliverables:/workspace"
+  docker_run_as_host_user: true
+  container_persistent: true
+```
+
+Fill in real host paths before use — the ones in `config/config.yaml` are placeholders.
+
+**How the enforcement actually works:** every terminal, file, and execute call — from the primary agent or any `delegate_task` subagent — routes through this one Docker container. The read-only vs. read-write split is enforced by the mount itself (`:ro` vs. no suffix), at the kernel level, not by which `toolsets` a given delegation call was given. A subagent can't write to a `:ro`-mounted path no matter what it attempts.
+
+- **Read-only document directories** (`/corpus/*`): mount each source directory separately with a `:ro` suffix. Don't try to unify scattered host directories with symlinks first — Docker bind-mounts don't follow a symlink to a target outside the mounted directory, so a symlink tree mounted alone will show up broken inside the container. Instead, mount each real source directory individually, choosing container-side paths that already look unified (`/corpus/collection-1`, `/corpus/collection-2`, etc.).
+- **Deliverables directory** (`/workspace`): a plain read-write host bind mount. Persistence across sessions, projects, and chats is automatic and doesn't depend on `container_persistent` — that flag only affects in-container state (installed packages, etc.), not this bind-mounted data, which lives on the host disk regardless of container lifecycle.
+- **`docker_run_as_host_user: true`**: without this, files written to `/workspace` come out root-owned on the host. Only works with the default `docker_image` (or plain Debian/Ubuntu-based images) — not with Hermes's own bundled image, which needs to start as root internally.
+
+Leaf subagents (the kind `delegate_task` spawns by default) can't call Hermes's `memory` tool directly. The natural pattern for turning read documents into persistent knowledge: have the subagent read and summarize, return the summary to the primary, and let the primary decide what's worth writing to memory — this is also what keeps large raw documents out of the main context window in the first place.
+
 ## Persistent storage layout
 
 | What | Where | Persists across updates? |
@@ -222,6 +247,7 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 | Gateway doesn't survive reboot | LaunchAgent not loaded, or the MLX servers weren't ready yet at login | Confirm `launchctl bootstrap` succeeded for both MLX plists and `hermes gateway status` shows the gateway supervised |
 | Subagents use the primary model instead of the fast one | `delegation:` isn't copied to `~/.hermes/config.yaml`, or `mlx-fast`'s server (`:8082`) isn't running | Check the block is present in `~/.hermes/config.yaml` and `curl http://127.0.0.1:8082/v1/models` responds |
 | Subagents seem slower than expected under 3-way concurrency | Expected — continuous batching trades some per-request latency for overall throughput (§5) | Not a bug; re-run `concurrency-test.sh` if the slowdown seems disproportionate |
+| Subagent reports a source document path doesn't exist, but it's clearly on the host | Tried to unify scattered directories with symlinks before mounting — Docker bind-mounts don't follow a symlink to a target outside the mounted directory | Mount each real source directory individually in `terminal.docker_volumes` (§11), not a directory of symlinks pointing elsewhere |
 
 ## Security notes
 
