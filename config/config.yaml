@@ -1,15 +1,5 @@
 # Hermes Agent config — copy to ~/.hermes/config.yaml
 #
-# This is now the live, Hermes-validated config pulled directly from a
-# working ~/.hermes/config.yaml (2026-07-14), after an earlier hand-authored
-# version caused an error in the Desktop app. Two things that version was
-# missing, now included below:
-#   - _config_version: a schema-version marker Hermes manages; a file
-#     without it is likely what triggered the Desktop app error.
-#   - custom_providers: a named-provider list, seemingly required by the
-#     Desktop app's model picker (which needs a label, not just a bare
-#     model.base_url) even though delegation/model work fine without it
-#     via the CLI alone.
 # Treat this file as Hermes-managed going forward — if you edit it by hand,
 # prefer `hermes dashboard` or letting Hermes itself write changes where
 # possible, since the exact schema (and _config_version) may shift between
@@ -17,17 +7,17 @@
 
 model:
   provider: custom
-  default: mlx-community/gemma-4-26b-a4b-it-4bit
-  base_url: http://127.0.0.1:8081/v1
+  default: gemma4:26b
+  base_url: http://localhost:11434/v1
   # api_key / context_length intentionally omitted — local unauthenticated
-  # endpoint, context auto-detected.
+  # endpoint, context auto-detected (262144 for gemma4:26b).
 
-# Subagent delegation — confirmed working via live log evidence (see
-# README.md §6): base_url is honored, subagents genuinely route to the
-# fast model on :8082, not a silent fallback to the primary.
+# Subagent delegation. Both primary and fast model are served by the same
+# Ollama instance — unlike a per-model-process backend, one endpoint here
+# covers both; only the model name differs.
 delegation:
-  model: mlx-community/gemma-4-e4b-it-4bit
-  base_url: http://127.0.0.1:8082/v1
+  model: gemma4:e4b
+  base_url: http://localhost:11434/v1
   max_concurrent_children: 3
 
 # Real Discord config shape (confirmed against cli-config.yaml.dist).
@@ -80,15 +70,15 @@ group_sessions_per_user: true
 # the live config was generated. Keep in sync with model.base_url/default
 # if you ever change the primary endpoint.
 custom_providers:
-  - name: Local (127.0.0.1:8081)
-    base_url: http://127.0.0.1:8081/v1
-    model: mlx-community/gemma-4-26b-a4b-it-4bit
+  - name: Local (Ollama)
+    base_url: http://localhost:11434/v1
+    model: gemma4:26b
 
 # Mixture-of-Agents intentionally omitted. Confirmed absent from both the
-# installer's default template and this live config, and per
-# NousResearch/hermes-agent issue #38952 (open as of June 2026), MoA is
-# currently hardcoded to a fixed set of frontier models — not configurable
-# via config.yaml today.
+# installer's default template and the live config this was validated
+# against, and per NousResearch/hermes-agent issue #38952 (open as of
+# June 2026), MoA is currently hardcoded to a fixed set of frontier
+# models — not configurable via config.yaml today.
 
 # ── Security ──────────────────────────────────────────────────────────
 # Secret redaction is ON by default — strings that look like API keys,
@@ -108,10 +98,9 @@ custom_providers:
 
 # ── Fallback Model ────────────────────────────────────────────────────
 # Automatic provider failover when primary is unavailable. Real key is
-# `fallback_model:` (singular) — corrects an earlier wrong guess in this
-# repo's history (`fallback_providers:` / `fallback:` were never real).
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
+# `fallback_model:` (singular). Uncomment and configure to enable.
+# Triggers on rate limits (429), overload (529), service errors (503),
+# or connection failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
