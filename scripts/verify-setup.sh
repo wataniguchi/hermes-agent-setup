@@ -30,7 +30,7 @@ echo "== Hermes Agent setup verification (Ollama backend) =="
 echo
 
 check "Ollama reachable"                            "curl -sf http://localhost:11434/api/tags"
-check "gemma4:26b pulled"                            "ollama list | awk '{print \$1}' | grep -qx 'gemma4:26b'"
+check "gpt-oss:120b-64k created"                     "ollama list | awk '{print \$1}' | grep -qx 'gpt-oss:120b-64k'"
 check "gemma4:e4b pulled"                            "ollama list | awk '{print \$1}' | grep -qx 'gemma4:e4b'"
 check "Hermes CLI installed"                         "command -v hermes"
 check "Hermes config file present"                   "test -f ~/.hermes/config.yaml"
@@ -40,9 +40,21 @@ check "Hermes gateway status reachable"              "hermes gateway status"
 check "Gateway LaunchAgent installed (Hermes-managed)" "test -f ~/Library/LaunchAgents/ai.hermes.gateway.plist"
 
 echo
+echo "== Sandbox image check =="
+check "hermes-sandbox:latest image built"            "docker image inspect hermes-sandbox:latest"
+if docker image inspect hermes-sandbox:latest >/dev/null 2>&1; then
+  if docker run --rm hermes-sandbox:latest python3 -c "import pypdf, pdfplumber" >/dev/null 2>&1; then
+    echo "pypdf/pdfplumber importable in image           OK"
+    pass=$((pass+1))
+  else
+    echo "pypdf/pdfplumber importable in image           FAIL — rebuild with ./scripts/build-sandbox-image.sh"
+    fail=$((fail+1))
+  fi
+fi
+
 echo "== Tool-calling sanity check (primary model) =="
 TOOL_TEST=$(curl -s http://localhost:11434/api/chat \
-  -d '{"model":"gemma4:26b","messages":[{"role":"user","content":"Use get_weather to check Yokohama."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"stream":false}' 2>/dev/null)
+  -d '{"model":"gpt-oss:120b-64k","messages":[{"role":"user","content":"Use get_weather to check Yokohama."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"stream":false}' 2>/dev/null)
 if echo "$TOOL_TEST" | grep -q '"tool_calls"'; then
   echo "Tool-calling: OK (valid tool_calls returned)"
   pass=$((pass+1))

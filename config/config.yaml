@@ -7,10 +7,37 @@
 
 model:
   provider: custom
-  default: gemma4:26b
+  default: gpt-oss:120b-64k
   base_url: http://localhost:11434/v1
   # api_key / context_length intentionally omitted — local unauthenticated
-  # endpoint, context auto-detected (262144 for gemma4:26b).
+  # endpoint, context auto-detected.
+  #
+  # gpt-oss:120b-64k (OpenAI, Apache 2.0) replaced gemma4:26b as primary.
+  # Reasoning: gemma4:26b showed a repeated pattern of narrating an action
+  # ("I will now...", "scanning for...") without the corresponding tool
+  # call actually happening, and of substituting raw extracted text for a
+  # genuine summary under task complexity — both consistent with published
+  # reward-hacking research showing this varies significantly by model and
+  # post-training approach, not primarily a sampling/temperature issue.
+  # gpt-oss:120b is classified "agent-native" (tool-use trained as a
+  # first-class objective) in independent benchmarking, unlike gemma4:26b's
+  # "general-purpose, edge-tuned" positioning, and it resolved both failure
+  # patterns cleanly in testing.
+  #
+  # The -64k tag (not the model's native 131072 context) is a deliberate
+  # memory trade-off: at 131072, Ollama reserves context per parallel slot
+  # (effectively 3x at OLLAMA_NUM_PARALLEL=3), which left only ~9GB free
+  # system-wide on a 128GB machine — not enough headroom for gemma4:e4b to
+  # coexist without eviction. At 65536, the same combination left ~39GB
+  # free at rest, confirmed genuinely coexisting under real 3-way
+  # concurrent load (validated via `ollama ps` + `sysctl vm.swapusage`,
+  # not just memory totals — swap stayed near-zero throughout).
+  #
+  # Create this tag if it doesn't exist yet:
+  #   ollama run gpt-oss:120b
+  #   >>> /set parameter num_ctx 65536
+  #   >>> /save gpt-oss:120b-64k
+  #   >>> /bye
 
 # Subagent delegation. Both primary and fast model are served by the same
 # Ollama instance — unlike a per-model-process backend, one endpoint here
@@ -35,7 +62,13 @@ discord:
 # a given delegate_task call was given.
 terminal:
   backend: docker
-  docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
+  # Custom image (docker/hermes-sandbox.Dockerfile), extends the stock
+  # nikolaik/python-nodejs image with pypdf/pdfplumber baked in — see
+  # scripts/build-sandbox-image.sh. Avoids needing to manually
+  # `docker exec -u root pip install ...` into every freshly-created
+  # container, which only ever persisted for that one container's
+  # lifetime anyway.
+  docker_image: "hermes-sandbox:latest"
 
   docker_volumes:
     # Read-only source documents — one line per directory. Docker's
@@ -51,8 +84,8 @@ terminal:
     - "/path/to/host/hermes-deliverables:/workspace"
 
   # Files written to /workspace come out owned by your host user instead
-  # of root. Only works with the default docker_image above (or plain
-  # Debian/Ubuntu-based images) — not with Hermes's own bundled image,
+  # of root. Works with hermes-sandbox:latest (built on the same base as
+  # the default docker_image) — not with Hermes's own bundled image,
   # which needs to start as root internally.
   docker_run_as_host_user: true
 
@@ -72,7 +105,7 @@ group_sessions_per_user: true
 custom_providers:
   - name: Local (Ollama)
     base_url: http://localhost:11434/v1
-    model: gemma4:26b
+    model: gpt-oss:120b-64k
 
 # Mixture-of-Agents intentionally omitted. Confirmed absent from both the
 # installer's default template and the live config this was validated
