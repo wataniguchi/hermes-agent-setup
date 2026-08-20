@@ -23,6 +23,17 @@ pre-loaded with: Sysinternals Suite, x64dbg/x32dbg, PE-bear, Ghidra
 (including `analyzeHeadless.bat` for scripted analysis), and Python. All
 tools are on the machine-wide `PATH`, callable by bare filename.
 
+**Executing the target program is NOT required to understand its behavior
+or solve most challenges.** The intended solution is very often to read
+and understand the program's actual logic — via disassembly (Ghidra) or
+decompilation (`decompile`, for .NET binaries) — and derive the answer
+directly from that, the same way source code review reveals what a
+program does without running it. Treat running/interacting with the
+binary as one optional technique among several, not the default approach.
+This matters concretely here: some binaries in this VM won't even launch
+(missing old runtime dependencies are common) — that is not a blocker, it
+is a normal case that static analysis handles fine.
+
 ## Procedure
 
 All commands run via `terminal` in this container. The helper script talks
@@ -69,6 +80,50 @@ python3 .../analyze_windows_binary.py exec <vmid> -- cmd /c "where x64dbg.exe"
 python3 .../analyze_windows_binary.py exec <vmid> -- C:\Tools\ghidra\support\analyzeHeadless.bat C:\Samples\project ProjectName -import C:\Samples\<filename>
 ```
 
+**Prefer static derivation first**: find the actual comparison/validation
+logic in the disassembly (Ghidra) or decompiled source (`decompile`, for
+.NET binaries), and derive/recompute the expected value directly — this is
+usually possible without ever running the target, and is the more robust
+path, especially since many binaries won't even launch cleanly in this VM
+(missing old runtime dependencies are common — that's diagnostic
+information pointing toward static analysis, not a blocker to work around).
+
+**If the binary is an interactive GUI app and genuinely runs**, and static
+analysis alone hasn't yielded the answer, `gui-probe` can drive it and
+report back real dialog/window text as a secondary confirmation:
+
+```
+python3 .../analyze_windows_binary.py gui-probe <vmid> C:\Samples\<filename> --input-text "candidate answer"
+```
+
+This launches the exe, sends candidate text plus Enter into its main
+window, and reports the resulting window/dialog text as JSON. Known
+limitation: it only tracks windows owned by the target's own process ID —
+if the binary crashes on launch (e.g. a missing-DLL error), the resulting
+system error dialog may belong to a different process and won't be
+captured; an empty result here is more likely a launch failure than a
+script bug — check whether the binary runs at all before assuming
+`gui-probe` itself is broken.
+
+**`gui-probe` also captures a real screenshot** (actual rendered pixels,
+not just control text — catches custom-painted content that window-text
+enumeration misses entirely). Add `--screenshot-out <local-path>` to pull
+it back automatically:
+
+```
+python3 .../analyze_windows_binary.py gui-probe <vmid> C:\Samples\<filename> --input-text "candidate" --screenshot-out /workspace/screenshot.png
+```
+
+**Important honest limitation: the model driving this skill is very
+likely text-only and cannot actually view the resulting image.** This
+screenshot capability exists for a human operator to inspect directly when
+the agent is stuck or when window-text enumeration alone isn't giving a
+clear picture — not as something the agent itself can currently read. If
+OCR tooling gets added to the golden template later, that would let the
+agent extract text from the screenshot programmatically; until then, treat
+a saved screenshot as something to hand back to the operator rather than
+something you can interpret yourself.
+
 **Check whether the binary is .NET (MSIL/CIL) BEFORE reaching for Ghidra.**
 Run `strings.exe -accepteula` against it (see step 3 below for the
 mechanics) and look for `mscorlib`, `System.Reflection`, `.NETFramework`,
@@ -103,14 +158,6 @@ challenge-platform references (e.g. a specific CTF platform name + problem
 number) are often enough to find that this is a previously-published
 challenge with a known writeup — worth a `web_search` before or alongside
 deeper RE work, as a way to confirm your approach or find one faster.
-Commands run under the SYSTEM account, not an interactive desktop session —
-GUI tools (x64dbg's UI, Ghidra's project window) won't be visible this way;
-use `analyzeHeadless.bat` or scriptable/CLI-driven tools for anything that
-needs to run through this interface. Sysinternals command-line tools
-(`handle.exe`, etc.) work fine; their EULAs were pre-accepted when the
-template was built — but for any Sysinternals tool NOT explicitly
-pre-accepted, add `-accepteula` to the command rather than risk a silent
-blocking dialog.
 
 Each `exec` call returns `{"exitcode": N, "stdout": "...", "stderr": "..."}`.
 
@@ -157,6 +204,34 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   If a task genuinely needs interactive GUI debugging (stepping through
   x64dbg visually), that's outside what this skill's `exec` subcommand can
   do; flag this back rather than attempting to fake it with headless output.
+  Sysinternals command-line tools (`handle.exe`, etc.) work fine; their
+  EULAs were pre-accepted when the template was built — but for any
+  Sysinternals tool NOT explicitly pre-accepted, add `-accepteula` to the
+  command rather than risk a silent blocking dialog.
+- **Never report a flag you have not verified.** Verification means one of:
+  (a) you found and read the actual comparison/validation logic in the
+  disassembly or decompiled source, and independently derived/recomputed
+  the exact value it checks against (this is usually the right approach —
+  it's how a real .NET binary's XOR-encoded flag was correctly solved
+  purely through static analysis, no execution needed), or (b) you
+  actually ran the program with your candidate and observed it succeed.
+  Recognizing a plausible-looking answer (a famous number, a common
+  phrase, a pattern that "seems right" based on general knowledge) is
+  **neither of these** — it is a guess. This has happened in practice: a
+  binary referencing the Hitchhiker's Guide's "42" led to reporting
+  `FLAG{42}` as final without ever deriving it from the actual code or
+  confirming it against real behavior.
+- **Don't assume a binary needs to actually run to be solved — prefer
+  static derivation first.** Many CTF reversing challenges are designed
+  to be solved by finding and reading the validation logic in the
+  disassembly/decompiled source, not by interacting with a live process.
+  This is also the more robust path when a binary genuinely can't run in
+  this VM (missing runtime dependencies like old MFC/VC++ redistributables
+  are common and not always worth fixing) — a binary that won't launch is
+  a signal to lean harder into Ghidra/decompilation, not a blocker.
+  `gui-probe` (below) is a secondary tool for when a binary genuinely does
+  run and static analysis alone hasn't yielded the answer — it does not
+  replace reading the actual logic.
 - **Never try to restart the guest agent service itself (`sc stop QEMU-GA` /
   `sc start QEMU-GA`) via `exec`.** This is a hard QEMU limitation, not a
   bug: a command that stops the agent service, issued *through that same

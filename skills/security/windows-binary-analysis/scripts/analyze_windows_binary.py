@@ -336,6 +336,73 @@ def cmd_pull(args):
     print(json.dumps({"pulled_to": args.local_out_path, "bytes": len(raw)}))
 
 
+GUI_PROBE_SCRIPT_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_probe.ps1")
+GUI_PROBE_GUEST_PATH = "C:\\Tools\\gui_probe.ps1"
+
+
+def ensure_gui_probe_deployed(vmid: int):
+    # Idempotent-ish: push it every call. It's tiny, and this avoids a
+    # separate "is it already there" check while guaranteeing the guest
+    # always has the current version of the driver script.
+    with open(GUI_PROBE_SCRIPT_LOCAL, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode()
+    call("POST", f"/vm/{vmid}/exec", {"command": ["cmd", "/c", "mkdir", "C:\\Tools"]})
+    call("POST", f"/vm/{vmid}/file", {"path": GUI_PROBE_GUEST_PATH, "content_base64": content_b64})
+
+
+def cmd_gui_probe(args):
+    # For GUI binaries that cannot be driven via piped stdin — launches
+    # the exe, optionally sends candidate input + Enter, and reports back
+    # the actual resulting window/dialog text (including MessageBox
+    # content), plus a real screenshot of the rendered screen. The
+    # screenshot catches custom-painted content that window-text
+    # enumeration misses, and is useful for a human to inspect directly
+    # even though the local text-only models driving this skill can't
+    # "see" it themselves.
+    ensure_gui_probe_deployed(args.vmid)
+
+    command = [
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", GUI_PROBE_GUEST_PATH,
+        "-ExePath", args.guest_exe_path,
+    ]
+    if args.input_text:
+        command += ["-InputText", args.input_text]
+
+    result = call(
+        "POST", f"/vm/{args.vmid}/exec",
+        {"command": command}, params={"timeout": 60}
+    )
+    if result.get("exitcode") != 0:
+        print(
+            f"gui_probe.ps1 failed (exitcode {result.get('exitcode')}): "
+            f"{result.get('stderr')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    stdout = result.get("stdout", "")
+    print(stdout)
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return
+
+    screenshot_guest_path = parsed.get("screenshot_path")
+    if screenshot_guest_path and args.screenshot_out:
+        try:
+            file_result = call(
+                "GET", f"/vm/{args.vmid}/file", params={"path": screenshot_guest_path}
+            )
+            raw = file_result["content"].encode("latin-1")
+            with open(args.screenshot_out, "wb") as f:
+                f.write(raw)
+            print(f"Screenshot saved to {args.screenshot_out}", file=sys.stderr)
+        except Exception as e:
+            print(f"Could not pull screenshot: {e}", file=sys.stderr)
+
+
 def cmd_decompile(args):
     # For .NET (MSIL/CIL) binaries — NOT native x86/x64 code. Ghidra and
     # x64dbg are the wrong tools for these; a .NET binary decompiles almost
@@ -432,6 +499,13 @@ def main():
     p_decompile.add_argument("vmid", type=int)
     p_decompile.add_argument("guest_path")
     p_decompile.set_defaults(func=cmd_decompile)
+
+    p_gui_probe = sub.add_parser("gui-probe")
+    p_gui_probe.add_argument("vmid", type=int)
+    p_gui_probe.add_argument("guest_exe_path")
+    p_gui_probe.add_argument("--input-text", default="", help="Candidate answer to send + Enter")
+    p_gui_probe.add_argument("--screenshot-out", default=None, help="Local path to save a screenshot PNG, if desired")
+    p_gui_probe.set_defaults(func=cmd_gui_probe)
 
     p_destroy = sub.add_parser("destroy")
     p_destroy.add_argument("vmid", type=int)
