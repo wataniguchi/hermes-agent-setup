@@ -352,13 +352,14 @@ def ensure_gui_probe_deployed(vmid: int):
 
 def cmd_gui_probe(args):
     # For GUI binaries that cannot be driven via piped stdin — launches
-    # the exe, optionally sends candidate input + Enter, and reports back
-    # the actual resulting window/dialog text (including MessageBox
-    # content), plus a real screenshot of the rendered screen. The
-    # screenshot catches custom-painted content that window-text
-    # enumeration misses, and is useful for a human to inspect directly
-    # even though the local text-only models driving this skill can't
-    # "see" it themselves.
+    # the exe, optionally sends one or more candidate inputs + Enter in
+    # sequence (for multi-stage challenges where a result only appears
+    # after several correct answers in order), and reports back the
+    # actual resulting window/dialog text after EACH step, plus a real
+    # screenshot of the final rendered screen. The screenshot catches
+    # custom-painted content that window-text enumeration misses, and is
+    # useful for a human to inspect directly even though the local
+    # text-only models driving this skill can't "see" it themselves.
     ensure_gui_probe_deployed(args.vmid)
 
     command = [
@@ -366,12 +367,14 @@ def cmd_gui_probe(args):
         "-File", GUI_PROBE_GUEST_PATH,
         "-ExePath", args.guest_exe_path,
     ]
-    if args.input_text:
+    if args.input_sequence:
+        command += ["-InputSequence", args.input_sequence]
+    elif args.input_text:
         command += ["-InputText", args.input_text]
 
     result = call(
         "POST", f"/vm/{args.vmid}/exec",
-        {"command": command}, params={"timeout": 60}
+        {"command": command}, params={"timeout": 120}
     )
     if result.get("exitcode") != 0:
         print(
@@ -503,7 +506,8 @@ def main():
     p_gui_probe = sub.add_parser("gui-probe")
     p_gui_probe.add_argument("vmid", type=int)
     p_gui_probe.add_argument("guest_exe_path")
-    p_gui_probe.add_argument("--input-text", default="", help="Candidate answer to send + Enter")
+    p_gui_probe.add_argument("--input-text", default="", help="Single candidate answer to send + Enter")
+    p_gui_probe.add_argument("--input-sequence", default="", help="Semicolon-separated inputs for multi-stage challenges, e.g. 'Human;Greenland;42'")
     p_gui_probe.add_argument("--screenshot-out", default=None, help="Local path to save a screenshot PNG, if desired")
     p_gui_probe.set_defaults(func=cmd_gui_probe)
 

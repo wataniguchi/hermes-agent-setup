@@ -1,27 +1,36 @@
 # @runtime PowerShell
-# GUI probe driver: launches a Windows GUI executable, optionally sends
-# input text + Enter, and reports back the text of every visible window
-# and control belonging to that process — including MessageBox dialogs,
-# which is where "Correct!"/"Wrong..."-style feedback typically lives.
+# GUI probe driver: launches a Windows GUI executable and submits a
+# SEQUENCE of inputs one after another (each followed by Enter), capturing
+# window/control text after every step — not just once. This exists
+# because some challenges are multi-stage (answer question 1, then a new
+# question/dialog appears, then question 2, etc.) and the final result
+# (e.g. a flag) may only appear after ALL steps are answered correctly in
+# order. A single-shot probe cannot reach that state at all.
 #
-# This exists because many CTF binaries are interactive GUI apps that
-# cannot be driven via piped stdin — this is the actual mechanism for
-# verifying a candidate answer against real program behavior instead of
-# reporting a plausible-looking guess as final.
+# This is the actual mechanism for verifying a candidate answer sequence
+# against real program behavior instead of reporting a plausible-looking
+# guess as final.
 #
 # Usage (from the bridge's exec, as a command array — no shell quoting
 # concerns since this never passes through bash):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File gui_probe.ps1
-#     -ExePath "C:\Samples\target.exe" -InputText "candidate answer"
+#     -ExePath "C:\Samples\target.exe" -InputSequence "Human;Greenland;42"
+#
+# -InputSequence: semicolon-separated list of inputs to submit in order.
+# For a single-input case, this is equivalent to the old -InputText
+# behavior (still accepted for backward compatibility).
 #
 # Output: JSON on stdout with initial_windows (right after launch) and
-# after_input_windows (after sending InputText + Enter and waiting) —
-# each window entry includes its title, class, and any child controls'
-# text (buttons, static labels, message text).
+# steps (one entry per input submitted, each showing the window/control
+# state observed after that step) — the LAST step's state is where a
+# final success message/flag is most likely to appear, but earlier steps
+# matter too (e.g. to confirm step 1 said "Correct" before step 2 was
+# even attempted).
 
 param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [Parameter(Mandatory=$false)][string]$InputText = "",
+    [Parameter(Mandatory=$false)][string]$InputSequence = "",
     [Parameter(Mandatory=$false)][int]$WaitForWindowSeconds = 5,
     [Parameter(Mandatory=$false)][int]$WaitAfterInputSeconds = 3
 )
@@ -54,6 +63,9 @@ public class Win32Probe {
 
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
 
     public static List<IntPtr> GetWindowsForProcess(uint pid) {
         List<IntPtr> result = new List<IntPtr>();
@@ -88,13 +100,19 @@ public class Win32Probe {
         }, IntPtr.Zero);
         return result;
     }
+
+    public static uint GetWindowProcessId(IntPtr hWnd) {
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        return pid;
+    }
 }
 "@
 
 Add-Type -AssemblyName System.Windows.Forms
 
-function Get-WindowSnapshot($pid) {
-    $windows = [Win32Probe]::GetWindowsForProcess([uint32]$pid)
+function Get-WindowSnapshot($procId) {
+    $windows = [Win32Probe]::GetWindowsForProcess([uint32]$procId)
     $snapshot = @()
     foreach ($w in $windows) {
         $title = [Win32Probe]::GetText($w)
@@ -128,32 +146,63 @@ function Escape-SendKeys($text) {
     return $result
 }
 
+function Send-ToActiveWindow($procId, $text) {
+    # Prefer the actual foreground window if it belongs to our process
+    # (correctly targets whichever dialog is currently active, which
+    # matters a lot once multiple dialogs appear over a sequence) —
+    # fall back to the first visible window if the foreground check
+    # doesn't match (e.g. focus hasn't settled yet).
+    $fg = [Win32Probe]::GetForegroundWindow()
+    $target = $null
+    if ([Win32Probe]::GetWindowProcessId($fg) -eq $procId) {
+        $target = $fg
+    } else {
+        $windows = [Win32Probe]::GetWindowsForProcess([uint32]$procId)
+        if ($windows.Count -gt 0) { $target = $windows[0] }
+    }
+    if ($target -ne $null) {
+        [Win32Probe]::SetForegroundWindow($target) | Out-Null
+        Start-Sleep -Milliseconds 500
+        $escaped = Escape-SendKeys $text
+        [System.Windows.Forms.SendKeys]::SendWait($escaped)
+        Start-Sleep -Milliseconds 300
+        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+        return $true
+    }
+    return $false
+}
+
+# Build the input sequence: prefer -InputSequence, fall back to legacy
+# single -InputText for backward compatibility.
+$inputs = @()
+if ($InputSequence -ne "") {
+    $inputs = $InputSequence -split ";"
+} elseif ($InputText -ne "") {
+    $inputs = @($InputText)
+}
+
 $proc = Start-Process -FilePath $ExePath -PassThru
 Start-Sleep -Seconds $WaitForWindowSeconds
 
 $result = [ordered]@{}
 $result.initial_windows = Get-WindowSnapshot $proc.Id
 
-if ($InputText -ne "") {
-    $windows = [Win32Probe]::GetWindowsForProcess([uint32]$proc.Id)
-    if ($windows.Count -gt 0) {
-        [Win32Probe]::SetForegroundWindow($windows[0]) | Out-Null
-        Start-Sleep -Milliseconds 500
-        $escaped = Escape-SendKeys $InputText
-        [System.Windows.Forms.SendKeys]::SendWait($escaped)
-        Start-Sleep -Milliseconds 300
-        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-        Start-Sleep -Seconds $WaitAfterInputSeconds
+$steps = @()
+foreach ($candidate in $inputs) {
+    $sent = Send-ToActiveWindow $proc.Id $candidate
+    Start-Sleep -Seconds $WaitAfterInputSeconds
+    $steps += [PSCustomObject]@{
+        input = $candidate
+        sent = $sent
+        windows_after = Get-WindowSnapshot $proc.Id
     }
 }
+$result.steps = $steps
 
-$result.after_input_windows = Get-WindowSnapshot $proc.Id
-
-# Capture the actual rendered screen, not just window/control text — this
-# catches custom-painted GDI content that GetWindowText can't see, and
-# works even when window enumeration under the target's own PID comes up
-# empty (e.g. a system error dialog for a missing DLL, which is often
-# owned by a different process than the one that failed to launch).
+# Capture the actual rendered screen after the full sequence — catches
+# custom-painted GDI content that GetWindowText can't see, and is useful
+# for a human operator to inspect directly (the model driving this skill
+# is very likely text-only and cannot view this itself).
 try {
     Add-Type -AssemblyName System.Drawing
     $screenBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -174,4 +223,4 @@ try {
     Stop-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($ExePath)) -Force -ErrorAction SilentlyContinue
 } catch {}
 
-$result | ConvertTo-Json -Depth 6 -Compress
+$result | ConvertTo-Json -Depth 8 -Compress

@@ -23,16 +23,20 @@ pre-loaded with: Sysinternals Suite, x64dbg/x32dbg, PE-bear, Ghidra
 (including `analyzeHeadless.bat` for scripted analysis), and Python. All
 tools are on the machine-wide `PATH`, callable by bare filename.
 
-**Executing the target program is NOT required to understand its behavior
-or solve most challenges.** The intended solution is very often to read
-and understand the program's actual logic — via disassembly (Ghidra) or
-decompilation (`decompile`, for .NET binaries) — and derive the answer
-directly from that, the same way source code review reveals what a
-program does without running it. Treat running/interacting with the
-binary as one optional technique among several, not the default approach.
-This matters concretely here: some binaries in this VM won't even launch
-(missing old runtime dependencies are common) — that is not a blocker, it
-is a normal case that static analysis handles fine.
+**A professional security analyst does not give up or guess just because
+dynamic execution isn't safely or readily available.** This is the same
+discipline real malware triage requires — you frequently cannot safely
+execute a target at all, and that has never been an excuse to stop
+investigating. When execution is unavailable (a binary that won't launch —
+missing old runtime dependencies are common in this VM) or would be unsafe
+to run freely, the correct professional response is **exhaustive static
+analysis**: full disassembly (Ghidra), decompilation (`decompile`, for
+.NET binaries), tracing data flow and cross-references until you actually
+understand what the program does — not settling for a plausible-looking
+guess because the "easy" path (just run it and see) isn't open. Dynamic
+execution (`gui-probe`, piped `exec`) remains a legitimate, valuable
+technique when a target genuinely runs in this air-gapped, disposable VM —
+use it. The point is never let its unavailability be a stopping condition.
 
 ## Procedure
 
@@ -80,13 +84,16 @@ python3 .../analyze_windows_binary.py exec <vmid> -- cmd /c "where x64dbg.exe"
 python3 .../analyze_windows_binary.py exec <vmid> -- C:\Tools\ghidra\support\analyzeHeadless.bat C:\Samples\project ProjectName -import C:\Samples\<filename>
 ```
 
-**Prefer static derivation first**: find the actual comparison/validation
-logic in the disassembly (Ghidra) or decompiled source (`decompile`, for
-.NET binaries), and derive/recompute the expected value directly — this is
-usually possible without ever running the target, and is the more robust
-path, especially since many binaries won't even launch cleanly in this VM
-(missing old runtime dependencies are common — that's diagnostic
-information pointing toward static analysis, not a blocker to work around).
+**Use whichever technique is safely and reliably available, and never let
+unavailability be a stopping condition.** If a binary genuinely runs, both
+static and dynamic analysis are legitimate — use what's actually useful.
+If a binary can't be run safely or reliably (missing runtime dependencies
+are common in this VM — that's diagnostic information, not a blocker),
+that means exhaustive static analysis: find the actual comparison,
+validation, or construction logic in the disassembly/decompiled source,
+and derive/recompute the result directly. This is professional discipline,
+not a workaround — it's the same standard real malware triage requires,
+since execution frequently isn't safe there either.
 
 **If the binary is an interactive GUI app and genuinely runs**, and static
 analysis alone hasn't yielded the answer, `gui-probe` can drive it and
@@ -95,6 +102,18 @@ report back real dialog/window text as a secondary confirmation:
 ```
 python3 .../analyze_windows_binary.py gui-probe <vmid> C:\Samples\<filename> --input-text "candidate answer"
 ```
+
+For multi-stage challenges (a result only appears after several correct
+answers submitted in order), use `--input-sequence` instead, semicolon-
+separated:
+
+```
+python3 .../analyze_windows_binary.py gui-probe <vmid> C:\Samples\<filename> --input-sequence "answer1;answer2;answer3"
+```
+
+This submits each answer in order, capturing window/dialog state after
+every step (not just the last) — useful both for confirming intermediate
+steps succeeded and for seeing the final result.
 
 This launches the exe, sends candidate text plus Enter into its main
 window, and reports the resulting window/dialog text as JSON. Known
@@ -221,17 +240,22 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   binary referencing the Hitchhiker's Guide's "42" led to reporting
   `FLAG{42}` as final without ever deriving it from the actual code or
   confirming it against real behavior.
-- **Don't assume a binary needs to actually run to be solved — prefer
-  static derivation first.** Many CTF reversing challenges are designed
-  to be solved by finding and reading the validation logic in the
-  disassembly/decompiled source, not by interacting with a live process.
-  This is also the more robust path when a binary genuinely can't run in
-  this VM (missing runtime dependencies like old MFC/VC++ redistributables
-  are common and not always worth fixing) — a binary that won't launch is
-  a signal to lean harder into Ghidra/decompilation, not a blocker.
-  `gui-probe` (below) is a secondary tool for when a binary genuinely does
-  run and static analysis alone hasn't yielded the answer — it does not
-  replace reading the actual logic.
+- **Never treat unavailable or unsafe execution as a reason to stop
+  investigating or to guess.** A binary that won't launch (missing old
+  runtime dependencies are common in this VM) or that shouldn't be run
+  freely is not a dead end — it is precisely the situation exhaustive
+  static analysis exists for. This is a professional standard, not a
+  workaround: real malware triage routinely can't safely execute the
+  target at all, and "I couldn't run it" is never an acceptable reason to
+  fall back on a plausible-sounding guess. Push disassembly/decompilation
+  as far as it takes — trace the actual comparison, validation, or
+  construction logic — before concluding you're stuck.
+- **When a binary genuinely runs, dynamic tools (`gui-probe`, piped
+  `exec`) are equally legitimate — use whichever technique the situation
+  actually calls for**, not a fixed preference order. `gui-probe`
+  (below) is a secondary tool for when a binary genuinely does run and
+  static analysis alone hasn't yielded the answer — it does not replace
+  reading the actual logic when that's the more reliable path.
 - **Never try to restart the guest agent service itself (`sc stop QEMU-GA` /
   `sc start QEMU-GA`) via `exec`.** This is a hard QEMU limitation, not a
   bug: a command that stops the agent service, issued *through that same
