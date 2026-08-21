@@ -26,6 +26,7 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 
 import requests
 import urllib3
@@ -38,6 +39,27 @@ PVE_HOST = os.environ["PVE_HOST"].rstrip("/")
 PVE_NODE = os.environ["PVE_NODE"]
 PVE_TOKEN_ID = os.environ["PVE_TOKEN_ID"]
 PVE_TOKEN_SECRET = os.environ["PVE_TOKEN_SECRET"]
+# The golden template — never a valid target for start/stop/exec/file
+# operations from a client. Only /vm/clone may ever reference it, and only
+# as the SOURCE of a clone. Confirmed necessary: an agent attempted direct
+# exec calls against this vmid in practice. Protecting it here, in the
+# bridge itself, means this holds regardless of what any client — correct,
+# confused, or malicious — asks for; it does not depend on any model
+# remembering a rule stated in a prompt or skill doc.
+PVE_TEMPLATE_VMID = int(os.environ.get("PVE_TEMPLATE_VMID", "9000"))
+
+
+def guard_not_template(vmid: int) -> None:
+    if vmid == PVE_TEMPLATE_VMID:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"vmid {vmid} is the golden template — it is never a valid "
+                "target for this operation. Only /vm/clone may reference it, "
+                "as the clone source. Use the vmid returned by a prior "
+                "/vm/clone call instead."
+            ),
+        )
 
 HEADERS = {"Authorization": f"PVEAPIToken={PVE_TOKEN_ID}={PVE_TOKEN_SECRET}"}
 # Proxmox ships a self-signed cert by default. For a lab setup this is fine;
@@ -45,6 +67,27 @@ HEADERS = {"Authorization": f"PVEAPIToken={PVE_TOKEN_ID}={PVE_TOKEN_SECRET}"}
 VERIFY_TLS = False
 
 app = FastAPI(title="Proxmox-Hermes bridge")
+
+
+@app.middleware("http")
+async def log_with_timestamp(request, call_next):
+    # uvicorn's own default access log (the "INFO: 127.0.0.1:PORT - ..."
+    # lines) has no timestamp at all, which made reconstructing an actual
+    # timeline of a troubleshooting session — when did errors start, how
+    # long between calls, was this before or after a destroy — genuinely
+    # difficult in practice, relying on log-order alone. This replaces
+    # that with an explicit timestamp on every request, plus how long it
+    # took, which the untimestamped default also didn't show.
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
+    print(
+        f"{ts} {request.method} {request.url.path} -> {response.status_code} "
+        f"({duration_ms:.0f}ms)",
+        flush=True,
+    )
+    return response
 
 
 def pve_url(path: str) -> str:
@@ -119,6 +162,14 @@ class CloneRequest(BaseModel):
 
 @app.post("/vm/clone")
 def clone_vm(req: CloneRequest):
+    if req.new_vmid == PVE_TEMPLATE_VMID:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"new_vmid {req.new_vmid} matches the golden template's own "
+                "vmid — refusing to clone onto/over the template itself."
+            ),
+        )
     upid = pve_request(
         "POST",
         f"/qemu/{req.template_vmid}/clone",
@@ -135,6 +186,7 @@ def clone_vm(req: CloneRequest):
 
 @app.post("/vm/{vmid}/start")
 def start_vm(vmid: int):
+    guard_not_template(vmid)
     upid = pve_request("POST", f"/qemu/{vmid}/status/start")
     wait_for_task(upid)
     return {"vmid": vmid, "status": "started"}
@@ -142,6 +194,7 @@ def start_vm(vmid: int):
 
 @app.post("/vm/{vmid}/stop")
 def stop_vm(vmid: int):
+    guard_not_template(vmid)
     upid = pve_request("POST", f"/qemu/{vmid}/status/stop")
     wait_for_task(upid)
     return {"vmid": vmid, "status": "stopped"}
@@ -149,6 +202,7 @@ def stop_vm(vmid: int):
 
 @app.post("/vm/{vmid}/rollback")
 def rollback_vm(vmid: int, snapname: str = "clean-tooled"):
+    guard_not_template(vmid)
     upid = pve_request("POST", f"/qemu/{vmid}/snapshot/{snapname}/rollback")
     wait_for_task(upid)
     return {"vmid": vmid, "status": f"rolled back to {snapname}"}
@@ -156,6 +210,7 @@ def rollback_vm(vmid: int, snapname: str = "clean-tooled"):
 
 @app.delete("/vm/{vmid}")
 def destroy_vm(vmid: int):
+    guard_not_template(vmid)
     status = pve_request("GET", f"/qemu/{vmid}/status/current")
     if status.get("status") == "running":
         stop_upid = pve_request("POST", f"/qemu/{vmid}/status/stop")
@@ -183,6 +238,7 @@ def health():
 
 @app.post("/vm/{vmid}/exec")
 def guest_exec(vmid: int, req: ExecRequest, timeout: int = 1800):
+    guard_not_template(vmid)
     # Default raised from 60s to 1800s (30 min). The original 60s default
     # was too short for real analysis commands — Ghidra's analyzeHeadless
     # in particular can run well past a minute, especially on a first run
@@ -240,6 +296,7 @@ class FileWriteRequest(BaseModel):
 
 @app.post("/vm/{vmid}/file")
 def guest_file_write(vmid: int, req: FileWriteRequest):
+    guard_not_template(vmid)
     pve_request(
         "POST",
         f"/qemu/{vmid}/agent/file-write",
@@ -250,6 +307,7 @@ def guest_file_write(vmid: int, req: FileWriteRequest):
 
 @app.get("/vm/{vmid}/file")
 def guest_file_read(vmid: int, path: str):
+    guard_not_template(vmid)
     result = pve_request("GET", f"/qemu/{vmid}/agent/file-read", params={"file": path})
     # Proxmox's API returns decoded text here, not base64 (unlike QEMU GA's
     # own guest-file-read spec, which returns base64). Verified empirically
@@ -358,6 +416,7 @@ def storage_upload(req: StorageUploadRequest):
 
 @app.post("/vm/{vmid}/cdrom")
 def attach_cdrom(vmid: int, req: CdromAttachRequest):
+    guard_not_template(vmid)
     pve_request(
         "PUT", f"/qemu/{vmid}/config",
         data={req.ide_slot: f"{req.volid},media=cdrom"},
@@ -367,6 +426,7 @@ def attach_cdrom(vmid: int, req: CdromAttachRequest):
 
 @app.delete("/vm/{vmid}/cdrom")
 def detach_cdrom(vmid: int, ide_slot: str = "ide3", storage: str | None = None, volid: str | None = None):
+    guard_not_template(vmid)
     pve_request("PUT", f"/qemu/{vmid}/config", data={"delete": ide_slot})
     if storage and volid:
         try:
