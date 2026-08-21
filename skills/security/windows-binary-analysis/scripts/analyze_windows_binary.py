@@ -260,9 +260,33 @@ def clear_session_marker():
 
 
 def session_is_alive(vmid: int) -> bool:
+    # First, try the cheap path: is it already running and responsive?
     try:
         result = call("POST", f"/vm/{vmid}/exec", {"command": ["cmd", "/c", "ver"]})
-        return result.get("exitcode") == 0
+        if result.get("exitcode") == 0:
+            return True
+    except SystemExit:
+        pass
+
+    # Guest-exec failed. This does NOT mean the session is dead — it could
+    # simply be powered off (e.g. left over from a previous session that
+    # ended without an explicit stop/start cycle). Confirmed in practice:
+    # this was happening every single time a new session started after an
+    # earlier one's VM was merely stopped, not destroyed — the old version
+    # of this check gave up immediately and triggered a full 30-60+ minute
+    # re-clone for a VM that just needed to be powered back on. Try
+    # starting it before concluding it's actually gone.
+    print(f"VM {vmid} not responding — checking if it's simply powered off ...", file=sys.stderr)
+    try:
+        call("POST", f"/vm/{vmid}/start")
+    except SystemExit:
+        # VM genuinely doesn't exist, is corrupted, or can't be started —
+        # this is the real "dead" case.
+        return False
+
+    try:
+        wait_for_guest(vmid)
+        return True
     except SystemExit:
         return False
 

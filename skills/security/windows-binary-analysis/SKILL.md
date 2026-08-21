@@ -55,11 +55,13 @@ Returns `{"vmid": N, "guest_path": "C:\\Samples\\<filename>", "reused": false}`.
 slow archival drive. This is normal, not a hang.
 
 **`start` is safe to call more than once — it will not create a duplicate
-VM.** If a session is already active, `start` detects it, confirms it's
-still alive, and pushes the new sample into the *existing* session instead
-of cloning again (`"reused": true` in the response). You do not need to
-track whether you've already called `start` in this task — just call it
-again if unsure, rather than guessing.
+VM.** If a session is already active, `start` detects it and confirms it's
+still usable — including automatically powering it back on if it was left
+stopped (not destroyed) between sessions, rather than treating "stopped"
+as "dead." Only if the VM genuinely can't be started at all does it fall
+back to cloning fresh. You do not need to track whether you've already
+called `start` in this task, or whether the VM happens to be powered on
+right now — just call it again if unsure, rather than guessing.
 
 Save the `vmid` — every subsequent command in this session needs it.
 
