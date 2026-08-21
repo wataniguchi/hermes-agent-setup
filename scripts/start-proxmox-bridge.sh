@@ -29,4 +29,5 @@ echo "Starting Proxmox bridge on 127.0.0.1:8811 (reachable from Hermes's Docker 
 exec "$VENV_DIR/bin/uvicorn" proxmox_bridge:app \
   --app-dir "$PROXMOX_DIR" \
   --host 127.0.0.1 \
-  --port 8811
+  --port 8811 \
+  --no-access-log
