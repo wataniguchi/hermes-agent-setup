@@ -269,6 +269,18 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   the actual target bytes. Describing what the algorithm "should" do,
   however confidently, is not verification and is not an acceptable
   substitute for running it.
+- **Never describe the contents, logic, or purpose of a named function
+  unless you decompiled that exact function yourself, in this same
+  session, and can show the real output.** Naming a function correctly
+  (e.g. from an inventory listing or a cross-reference) is not the same
+  as knowing what it contains. This has happened for real: a function
+  was cited by name and its behavior confidently described, while the
+  actual `ghidra-decompile` call in that same trace was for a completely
+  different function — the description was invented, not read. If you
+  reference a function's contents in your reasoning or your final answer,
+  the corresponding `ghidra-decompile` call for that specific function
+  must appear earlier in the same session, and you should be able to
+  paste its real output on request.
 - **Never report a flag you have not verified.** Verification means one of:
   (a) you found and read the actual comparison/validation logic in the
   disassembly or decompiled source, and independently derived/recomputed
