@@ -45,13 +45,36 @@ def main():
         listing = program.getListing()
 
         if mode == "inventory":
+            # PE-loader structural bookkeeping — the .reloc section's
+            # relocation table (one header plus hundreds of individual
+            # "word" fixup entries per block) — is never CTF-relevant and
+            # confirmed in practice to be genuinely enormous for even a
+            # small binary. Filtering by data-type name alone isn't
+            # enough: only the block HEADER carries an
+            # IMAGE_BASE_RELOCATION-prefixed type — every individual fixup
+            # underneath it is typed just "word", indistinguishable by
+            # type name alone from any other word-sized value elsewhere in
+            # the binary. Filtering by actual PE section name instead
+            # correctly catches the whole section regardless of each
+            # entry's own type.
+            memory = program.getMemory()
+            SKIP_SECTIONS = {".reloc"}
+
+            def in_skipped_section(addr) -> bool:
+                block = memory.getBlock(addr)
+                return block is not None and block.getName() in SKIP_SECTIONS
+
             result = {"functions": [], "data": []}
             for func in listing.getFunctions(True):
                 result["functions"].append({
                     "name": func.getName(),
                     "address": str(func.getEntryPoint()),
                 })
+            skipped_count = 0
             for data in listing.getDefinedData(True):
+                if in_skipped_section(data.getAddress()):
+                    skipped_count += 1
+                    continue
                 try:
                     val = str(data.getValue())
                 except Exception:
@@ -62,6 +85,12 @@ def main():
                     "length": data.getLength(),
                     "value": val,
                 })
+            if skipped_count:
+                result["_note"] = (
+                    f"{skipped_count} entries in .reloc (PE relocation "
+                    "table bookkeeping) omitted — never CTF-relevant, and "
+                    "were making this dump excessively large."
+                )
             print(json.dumps(result, indent=2))
 
         elif mode == "decompile":
