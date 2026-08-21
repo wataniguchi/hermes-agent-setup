@@ -71,19 +71,22 @@ app = FastAPI(title="Proxmox-Hermes bridge")
 
 @app.middleware("http")
 async def log_with_timestamp(request, call_next):
-    # uvicorn's own default access log (the "INFO: 127.0.0.1:PORT - ..."
-    # lines) has no timestamp at all, which made reconstructing an actual
-    # timeline of a troubleshooting session — when did errors start, how
-    # long between calls, was this before or after a destroy — genuinely
-    # difficult in practice, relying on log-order alone. This replaces
-    # that with an explicit timestamp on every request, plus how long it
-    # took, which the untimestamped default also didn't show.
+    # Logging only on completion (the original version of this) is silent
+    # for the ENTIRE duration of a long-running request like /vm/clone —
+    # up to an hour of no output at all, which is exactly backwards for
+    # the request type where "is this actually progressing or silently
+    # stuck" is the question that matters most. Log on both start and
+    # finish instead.
     start = time.monotonic()
+    ts_start = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
+    print(f"{ts_start} {request.method} {request.url.path} started", flush=True)
+
     response = await call_next(request)
+
     duration_ms = (time.monotonic() - start) * 1000
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
+    ts_end = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
     print(
-        f"{ts} {request.method} {request.url.path} -> {response.status_code} "
+        f"{ts_end} {request.method} {request.url.path} -> {response.status_code} "
         f"({duration_ms:.0f}ms)",
         flush=True,
     )
