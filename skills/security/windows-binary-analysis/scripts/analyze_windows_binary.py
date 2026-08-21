@@ -249,9 +249,31 @@ def read_session_marker():
         return None
 
 
-def write_session_marker(vmid: int):
+def try_claim_session_marker(vmid: int) -> bool:
+    """Atomically create the session marker only if it doesn't already
+    exist, claiming this vmid to clone. Returns True if this call won —
+    no marker existed a moment ago and this call just created one — and
+    False if another process already holds it (a real marker now exists;
+    the caller should read and handle it normally instead of cloning).
+
+    A plain read-then-write for this step was a genuine, confirmed gap:
+    two `start` calls close enough together in time could both see "no
+    marker exists yet" and both proceed to clone, since nothing made the
+    check-then-write a single atomic operation. os.O_CREAT | os.O_EXCL is
+    atomic at the OS level — exactly one caller can ever win it.
+    """
+    try:
+        fd = os.open(SESSION_MARKER_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        json.dump({"vmid": vmid, "started_at": time.time(), "status": "cloning"}, f)
+    return True
+
+
+def write_session_marker(vmid: int, status: str = "ready"):
     with open(SESSION_MARKER_PATH, "w") as f:
-        json.dump({"vmid": vmid, "started_at": time.time()}, f)
+        json.dump({"vmid": vmid, "started_at": time.time(), "status": status}, f)
 
 
 def clear_session_marker():
@@ -295,31 +317,106 @@ def cmd_start(args):
     marker = read_session_marker()
     if marker and not args.force:
         existing_vmid = marker["vmid"]
-        print(
-            f"A session already exists (vmid {existing_vmid}, started "
-            f"{time.time() - marker['started_at']:.0f}s ago) — checking if it's still "
-            "alive instead of cloning a new one ...",
-            file=sys.stderr,
-        )
-        if session_is_alive(existing_vmid):
-            guest_path = push_sample(existing_vmid, args.sample_path)
+        status = marker.get("status", "ready")  # markers from before this fix have no status field — treat as ready
+        age = time.time() - marker["started_at"]
+
+        if status == "cloning":
+            # Another start call — this same task retrying, or a genuinely
+            # concurrent one — is already mid-clone for this vmid. Cloning
+            # from the SMR-backed template can legitimately take up to
+            # ~60 minutes, so a "cloning" marker up to that age is expected,
+            # not stale. This is the actual fix for a confirmed bug: before
+            # this marker existed, multiple start calls issued close
+            # together (before the first one's marker was written at the
+            # very end) each independently kicked off their own fresh
+            # clone, producing several redundant in-progress VMs at once.
+            if age < 90 * 60:
+                print(
+                    f"A clone for vmid {existing_vmid} is already in progress "
+                    f"(started {age:.0f}s ago) — waiting for it to finish instead "
+                    "of starting a duplicate clone ...",
+                    file=sys.stderr,
+                )
+                wait_for_guest(existing_vmid)
+                write_session_marker(existing_vmid, status="ready")
+                guest_path = push_sample(existing_vmid, args.sample_path)
+                print(
+                    f"Existing in-progress clone {existing_vmid} finished — pushed "
+                    f"{args.sample_path} into it.",
+                    file=sys.stderr,
+                )
+                print(json.dumps({"vmid": existing_vmid, "guest_path": guest_path, "reused": True}))
+                return
+            else:
+                print(
+                    f"A 'cloning' marker for vmid {existing_vmid} is {age:.0f}s old — "
+                    "far beyond any realistic clone time, so treating it as abandoned "
+                    "(e.g. left behind by a crashed earlier session) rather than "
+                    "genuinely in progress. Clearing it and starting fresh.",
+                    file=sys.stderr,
+                )
+                clear_session_marker()
+        else:
             print(
-                f"Reusing existing session {existing_vmid} — pushed {args.sample_path} "
-                "into it rather than starting a new session. This is expected: start is "
-                "idempotent when a live session already exists.",
+                f"A session already exists (vmid {existing_vmid}, started "
+                f"{age:.0f}s ago) — checking if it's still alive instead of cloning "
+                "a new one ...",
                 file=sys.stderr,
             )
+            if session_is_alive(existing_vmid):
+                guest_path = push_sample(existing_vmid, args.sample_path)
+                print(
+                    f"Reusing existing session {existing_vmid} — pushed {args.sample_path} "
+                    "into it rather than starting a new session. This is expected: start is "
+                    "idempotent when a live session already exists.",
+                    file=sys.stderr,
+                )
+                print(json.dumps({"vmid": existing_vmid, "guest_path": guest_path, "reused": True}))
+                return
+            else:
+                print(
+                    f"Existing session {existing_vmid} is no longer responsive — clearing "
+                    "stale marker and starting fresh.",
+                    file=sys.stderr,
+                )
+                clear_session_marker()
+
+    vmid = args.vmid or (9100 + int(time.time()) % 400)
+
+    # Atomic claim, not a plain write — this is what actually closes the
+    # race, not just narrows it. Written BEFORE the slow clone/boot steps
+    # begin, so any other start call arriving while this one is mid-clone
+    # sees a real marker and waits for it, rather than finding nothing and
+    # kicking off its own duplicate clone.
+    if not try_claim_session_marker(vmid):
+        # Lost the race — another start call (this same task retrying, or
+        # a genuinely concurrent one) claimed the marker in the moment
+        # between our read above and this point. Handle it exactly like a
+        # pre-existing "cloning" marker: wait for it, don't clone anyway.
+        marker = read_session_marker()
+        existing_vmid = marker["vmid"]
+        status = marker.get("status", "ready")
+        age = time.time() - marker["started_at"]
+        if status == "cloning" and age < 90 * 60:
+            print(
+                f"Lost a race to start a new session — vmid {existing_vmid} was "
+                "just claimed by another start call moments ago. Waiting for "
+                "it to finish instead of cloning a second one.",
+                file=sys.stderr,
+            )
+            wait_for_guest(existing_vmid)
+            write_session_marker(existing_vmid, status="ready")
+            guest_path = push_sample(existing_vmid, args.sample_path)
             print(json.dumps({"vmid": existing_vmid, "guest_path": guest_path, "reused": True}))
             return
         else:
             print(
-                f"Existing session {existing_vmid} is no longer responsive — clearing "
-                "stale marker and starting fresh.",
+                f"Unexpected marker state after losing a claim race (vmid "
+                f"{existing_vmid}, status {status!r}) — run start again rather "
+                "than proceeding on an assumption.",
                 file=sys.stderr,
             )
-            clear_session_marker()
-
-    vmid = args.vmid or (9100 + int(time.time()) % 400)
+            sys.exit(1)
 
     print(f"Cloning template {TEMPLATE_VMID} -> {vmid} (this can take a while) ...", file=sys.stderr)
     call("POST", "/vm/clone", {"template_vmid": TEMPLATE_VMID, "new_vmid": vmid, "name": f"analysis-{vmid}"})
@@ -329,10 +426,11 @@ def cmd_start(args):
 
     print("Waiting for guest agent ...", file=sys.stderr)
     wait_for_guest(vmid)
-    write_session_marker(vmid)  # written as soon as the VM is confirmed
-    # alive, not after push — if the client dies mid-push (e.g. hit by
-    # terminal.timeout on a slow clone), the session is still discoverable
-    # and resumable on the next start call, instead of silently re-cloning.
+    write_session_marker(vmid, status="ready")  # upgrade from "cloning" to "ready" —
+    # written as soon as the VM is confirmed alive, not after push — if the
+    # client dies mid-push (e.g. hit by terminal.timeout on a slow clone),
+    # the session is still discoverable and resumable on the next start
+    # call, instead of silently re-cloning.
 
     guest_path = push_sample(vmid, args.sample_path)
     print(json.dumps({"vmid": vmid, "guest_path": guest_path, "reused": False}))
