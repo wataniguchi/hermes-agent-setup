@@ -281,6 +281,21 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   the corresponding `ghidra-decompile` call for that specific function
   must appear earlier in the same session, and you should be able to
   paste its real output on request.
+- **If a derivation attempt produces a genuinely non-meaningful result
+  (e.g. decrypted bytes that aren't valid text, a decompressed value that
+  isn't sensible), that means your method, key, offset, or algorithm is
+  wrong — it is not license to substitute a culturally familiar
+  "plausible" answer instead.** This has happened for real: an attempt to
+  decrypt a stored answer produced invalid, non-ASCII output; rather than
+  going back to find what was actually wrong with the derivation (wrong
+  key, wrong offset, wrong transform), the response was quietly replaced
+  with "Man" — the famous, textbook answer to the Sphinx's riddle — when
+  the binary's actual expected string was "Human." A well-known riddle's
+  canonical answer is not evidence about what THIS SPECIFIC binary
+  expects; every riddle in a CTF challenge is a deliberate opportunity to
+  plant exactly this kind of trap. When a derivation stalls, say so
+  explicitly and go find the actual bug in your method — do not fill the
+  gap with trivia and present it as a finding.
 - **Never report a flag you have not verified.** Verification means one of:
   (a) you found and read the actual comparison/validation logic in the
   disassembly or decompiled source, and independently derived/recomputed
