@@ -52,12 +52,47 @@ def pve_url(path: str) -> str:
 
 
 def pve_request(method: str, path: str, **kwargs) -> dict:
-    resp = requests.request(
-        method, pve_url(path), headers=HEADERS, verify=VERIFY_TLS, timeout=30, **kwargs
-    )
-    if not resp.ok:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return resp.json().get("data")
+    # Individual requests to Proxmox occasionally hit transient network
+    # blips (read timeouts, connection resets) — especially plausible
+    # during a slow clone, when the host is under load, or over this
+    # particular Mac-to-Proxmox link, which has shown intermittent
+    # flakiness before. Confirmed this actually broke a real session: a
+    # clone's wait-loop died on a transient ReadTimeout on ONE poll out of
+    # thousands, the bridge reported failure to the client, and the
+    # calling agent concluded (incorrectly) that the VM itself was
+    # broken and destroyed it — while the clone had very possibly
+    # completed successfully server-side the whole time, since a Proxmox
+    # task UPID isn't tied to our polling connection at all.
+    #
+    # Retry only genuine transport-level failures here (connection reset,
+    # read timeout) — NOT a real non-2xx response from Proxmox, which
+    # reflects an actual problem and should propagate immediately rather
+    # than being silently retried.
+    last_exc = None
+    for attempt in range(4):
+        try:
+            resp = requests.request(
+                method, pve_url(path), headers=HEADERS, verify=VERIFY_TLS,
+                timeout=60, **kwargs
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s before retrying
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Transient network error talking to Proxmox after "
+                    f"4 attempts (this call itself may have nothing wrong "
+                    f"with the underlying VM/task — treat as inconclusive, "
+                    f"not as evidence the VM is broken): {exc}"
+                ),
+            ) from exc
+        if not resp.ok:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json().get("data")
+    raise HTTPException(status_code=502, detail=f"Retry exhaustion: {last_exc}")
 
 
 def wait_for_task(upid: str, timeout: int = 7200) -> None:
