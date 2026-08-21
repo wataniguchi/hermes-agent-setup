@@ -406,6 +406,56 @@ def cmd_gui_probe(args):
             print(f"Could not pull screenshot: {e}", file=sys.stderr)
 
 
+PYGHIDRA_TOOL_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyghidra_tool.py")
+PYGHIDRA_TOOL_GUEST_PATH = "C:\\PyGhidraTool\\pyghidra_tool.py"
+# Deliberately its own directory, not C:\Tools (where Ghidra itself lives)
+# and not C:\Samples (where target binaries live). Tonight's earlier
+# RecursionError happened with the script at C:\Tools\pyghidra_tool.py and
+# unquoted exec arguments; the fix that resolved it changed BOTH the
+# directory (moved to C:\Samples) and the quoting at the same time, so
+# which one actually mattered was never cleanly isolated. Keeping the
+# script away from C:\Tools\ghidra costs nothing and removes one variable
+# of uncertainty regardless of which theory is correct.
+
+
+def ensure_pyghidra_tool_deployed(vmid: int):
+    with open(PYGHIDRA_TOOL_LOCAL, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode()
+    call("POST", f"/vm/{vmid}/exec", {"command": ["cmd", "/c", "mkdir", "C:\\PyGhidraTool"]})
+    call("POST", f"/vm/{vmid}/file", {"path": PYGHIDRA_TOOL_GUEST_PATH, "content_base64": content_b64})
+
+
+def cmd_ghidra_inventory(args):
+    # Dumps EVERY data symbol and function — not just printable strings.
+    # Run this BEFORE forming a hypothesis about what a binary needs; a
+    # multi-entry static data table is invisible to a strings dump alone.
+    ensure_pyghidra_tool_deployed(args.vmid)
+    result = call(
+        "POST", f"/vm/{args.vmid}/exec",
+        {"command": ["python", PYGHIDRA_TOOL_GUEST_PATH, "inventory", args.guest_exe_path]},
+        params={"timeout": 300},
+    )
+    print(result.get("stdout", ""))
+    if result.get("exitcode") != 0:
+        print(f"pyghidra_tool.py inventory failed: {result.get('stderr')}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_ghidra_decompile(args):
+    # Decompiles ONE function via PyGhidra and prints real C — use this
+    # instead of reasoning about disassembly by hand.
+    ensure_pyghidra_tool_deployed(args.vmid)
+    result = call(
+        "POST", f"/vm/{args.vmid}/exec",
+        {"command": ["python", PYGHIDRA_TOOL_GUEST_PATH, "decompile", args.guest_exe_path, args.function]},
+        params={"timeout": 300},
+    )
+    print(result.get("stdout", ""))
+    if result.get("exitcode") != 0:
+        print(f"pyghidra_tool.py decompile failed: {result.get('stderr')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_decompile(args):
     # For .NET (MSIL/CIL) binaries — NOT native x86/x64 code. Ghidra and
     # x64dbg are the wrong tools for these; a .NET binary decompiles almost
@@ -502,6 +552,17 @@ def main():
     p_decompile.add_argument("vmid", type=int)
     p_decompile.add_argument("guest_path")
     p_decompile.set_defaults(func=cmd_decompile)
+
+    p_ghidra_inventory = sub.add_parser("ghidra-inventory")
+    p_ghidra_inventory.add_argument("vmid", type=int)
+    p_ghidra_inventory.add_argument("guest_exe_path")
+    p_ghidra_inventory.set_defaults(func=cmd_ghidra_inventory)
+
+    p_ghidra_decompile = sub.add_parser("ghidra-decompile")
+    p_ghidra_decompile.add_argument("vmid", type=int)
+    p_ghidra_decompile.add_argument("guest_exe_path")
+    p_ghidra_decompile.add_argument("function", help="Function name or address, e.g. FUN_004017d0 or 004017d0")
+    p_ghidra_decompile.set_defaults(func=cmd_ghidra_decompile)
 
     p_gui_probe = sub.add_parser("gui-probe")
     p_gui_probe.add_argument("vmid", type=int)

@@ -20,6 +20,92 @@ Ollama (single process, serves both models by name)
 
 **Why `gpt-oss:120b` replaced `gemma4:26b` as primary:** `gemma4:26b` showed a repeated, real pattern across extended agentic use — narrating an action ("I will now...", "scanning for...") without the corresponding tool call actually happening in the same turn, and substituting raw extracted document text for a genuine summary under task complexity. This is consistent with published reward-hacking research showing this varies significantly by model and post-training approach specifically, not primarily something temperature or other sampling settings fix. `gpt-oss:120b` is classified "agent-native" (tool-use trained as a first-class objective) in independent benchmarking, versus `gemma4:26b`'s positioning as a general-purpose, edge/laptop-tuned model — and it resolved both failure patterns cleanly in direct side-by-side testing on the same real task.
 
+## Architecture at a glance
+
+This section describes the full environment an agent (primary or subagent)
+actually operates in — what it can reach, what it can install, and what's
+deliberately walled off. Worth reading both as a human operator and as
+context for what to expect an agent to already know about its own
+affordances (this section is referenced from the Proxmox skill's own
+documentation for exactly that reason).
+
+```mermaid
+flowchart TB
+    subgraph MacStudio["Mac Studio (this host)"]
+        Ollama["Ollama\n(gpt-oss:120b-64k, gemma4:e4b)"]
+        subgraph DockerSandbox["Docker sandbox — ONE persistent container"]
+            Primary["Primary agent"]
+            Sub["delegate_task subagents\n(fresh conversation, SAME container)"]
+        end
+        Workspace["/workspace\n(host dir, read-write)"]
+        Corpus["/corpus/collection-*\n(host dirs, read-only)"]
+        Bridge["proxmox_bridge.py\n(127.0.0.1:8811, host process — NOT in Docker)"]
+    end
+
+    subgraph Internet["Internet"]
+        Web["web_search / web_fetch\npackage registries (pip, apt, dotnet, nuget)"]
+    end
+
+    subgraph ProxmoxHost["Proxmox host (separate physical machine)"]
+        subgraph WinVM["Windows analysis VM — air-gapped clone"]
+            WinTools["Fixed toolkit: Ghidra, x64dbg,\nSysinternals, Python, .NET SDK,\nilspycmd — baked into golden template"]
+        end
+    end
+
+    Primary -- "shares container, filesystem,\ninstalled packages with" --> Sub
+    DockerSandbox -- "real internet access,\ncan install anything\n(pip/apt/npm/etc.)" --> Web
+    DockerSandbox -- "read-write" --> Workspace
+    DockerSandbox -- "read-only" --> Corpus
+    DockerSandbox -- "host.docker.internal:8811" --> Bridge
+    Bridge -- "Proxmox REST API\n(clone/start/stop/snapshot)" --> ProxmoxHost
+    Bridge -- "QEMU Guest Agent\n(virtio-serial, NOT network)" --> WinVM
+    WinVM -.->|"NO internet\nNO route to Mac Studio\nvmbr1 has no physical uplink"| Internet
+```
+
+**The Docker sandbox is one shared, internet-capable, tool-installable
+Linux environment.** Primary and every `delegate_task` subagent execute in
+the *same* persistent container — same filesystem, same installed
+packages, same running background processes — even though each subagent
+gets a fresh, isolated *conversation* with no memory of the parent's
+history or prior tool calls. If the primary `pip install`s something,
+every subagent sees it too, without needing to install it again. This
+container has real internet access and the agent has authority to install
+whatever tools a task needs (`apt`, `pip`, `npm`, language toolchains,
+`radare2`, `gdb`, whatever's actually useful) — nothing here is fixed or
+pre-approved, unlike the Windows side below.
+
+**The only interfaces between this container and the rest of the world**
+are: (1) the explicit host-directory mounts (`/workspace` read-write,
+`/corpus/*` read-only — nothing else on the Mac Studio's filesystem is
+reachable), (2) normal internet access for research and package
+installation, and (3) the Proxmox bridge, reachable at
+`host.docker.internal:8811` — a narrow HTTP API, not a general network
+route to anything.
+
+**The Windows VM is a completely different trust and capability regime,
+on purpose.** It is a disposable clone of a golden template, on a
+*separate physical machine* (the Proxmox host), with **no internet access
+at all** — `vmbr1` has no physical network uplink, not just a firewall
+rule, so this holds even if something inside the VM were compromised. Its
+toolkit (Ghidra, x64dbg, Sysinternals, Python, .NET SDK, `ilspycmd`) is
+**fixed at template-build time** — an agent cannot install anything new
+into this VM at runtime; the only way new tools get added is a human
+operator manually rebuilding the golden template (see `README_Proxmox.md`).
+The **only** path in or out of this VM is the bridge's narrow API
+(`analyze_windows_binary.py`'s `start`/`push`/`exec`/`pull`/`decompile`/
+`gui-probe`/`destroy`), which itself never gives the VM a network route —
+it relays through Proxmox's management API and QEMU's guest-agent channel
+(virtio-serial), neither of which touches the VM's own (nonexistent)
+network interface.
+
+**Practical implication for routing a task**: if a target needs a tool
+that isn't already in the Windows golden template, the Windows VM cannot
+get it — that work either happens in the Linux Docker sandbox instead (if
+the target is Linux/cross-platform and the sandbox's internet + install
+authority can get what's needed), or it requires a human operator to
+rebuild the template. This is a real, current limitation, not an oversight
+to work around inside a task.
+
 **The `-64k` tag is a deliberate memory trade-off, not the model's native context.** At `gpt-oss:120b`'s native 131072 context, Ollama reserves context per parallel slot (effectively 3× at `OLLAMA_NUM_PARALLEL=3`), which left only ~9GB free system-wide on this 128GB machine — not enough headroom for `gemma4:e4b` to coexist without eviction. At 65536, the same combination left ~39GB free at rest, and was confirmed to genuinely coexist under real 3-way concurrent load (validated via `ollama ps` plus `sysctl vm.swapusage` — swap stayed near-zero throughout, not just a one-time memory snapshot).
 
 **Version requirement:** Ollama 0.22.0 or later — earlier builds predate the `llama.cpp` Gemma 4 fixes, particularly around tool-calling reliability. `gemma4:e4b` (the fast/delegation model) still depends on this.

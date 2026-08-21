@@ -81,8 +81,30 @@ normal way to interact with the VM, not just for setup):
 ```
 python3 .../analyze_windows_binary.py exec <vmid> -- cmd /c "certutil -hashfile C:\Samples\<filename> SHA256"
 python3 .../analyze_windows_binary.py exec <vmid> -- cmd /c "where x64dbg.exe"
-python3 .../analyze_windows_binary.py exec <vmid> -- C:\Tools\ghidra\support\analyzeHeadless.bat C:\Samples\project ProjectName -import C:\Samples\<filename>
+python3 .../analyze_windows_binary.py ghidra-inventory <vmid> C:\Samples\<filename>
+python3 .../analyze_windows_binary.py ghidra-decompile <vmid> C:\Samples\<filename> FUN_004017d0
 ```
+
+**Always run `ghidra-inventory` before forming any hypothesis about what a
+binary needs.** It dumps EVERY defined data symbol (arrays, their
+declared sizes, static tables) and EVERY function — not just printable
+strings. This matters concretely: a multi-entry validation table (e.g.
+several separate encoded-answer arrays) is a static data structure with
+no printable-string representation at all — a `strings` pass genuinely
+cannot find it, no matter how carefully you read the output. Missing this
+step has caused real, avoidable failures — concluding a binary needs only
+as many answers as there are visible question strings, when the actual
+data structure has more entries than that.
+
+**Once you've identified a function worth understanding, decompile it
+with `ghidra-decompile` and read the actual C — do not reason about
+disassembly or opcodes by hand as a substitute.** If a function
+implements some transform or algorithm (encoding, hashing, a keystream
+generator), **reimplement it faithfully and actually run it** — don't
+reason abstractly about what the algorithm "would" produce. A transform
+that is correctly transcribed and executed gives you ground truth; a
+transform you only reasoned about does not, even if your reasoning sounds
+confident.
 
 **Use whichever technique is safely and reliably available, and never let
 unavailability be a stopping condition.** If a binary genuinely runs, both
@@ -227,6 +249,21 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   EULAs were pre-accepted when the template was built — but for any
   Sysinternals tool NOT explicitly pre-accepted, add `-accepteula` to the
   command rather than risk a silent blocking dialog.
+- **Run `ghidra-inventory` before forming a hypothesis about what a binary
+  needs — printable strings alone are not a complete picture.** A static
+  data table (e.g. multiple separate answer/validation arrays) has no
+  printable-string representation. This has caused a real failure:
+  concluding a challenge needed exactly as many correct inputs as there
+  were visible question strings, when the actual data structure had more
+  entries than that — the extra one was only visible in the full data
+  inventory, never in `strings` output.
+- **A claimed algorithm or transform must be verified by actually running
+  it, not by reasoning about what it would produce.** If you decompile a
+  function that encodes/hashes/transforms data, transcribe it faithfully
+  into a real script and execute it — compare its actual output against
+  the actual target bytes. Describing what the algorithm "should" do,
+  however confidently, is not verification and is not an acceptable
+  substitute for running it.
 - **Never report a flag you have not verified.** Verification means one of:
   (a) you found and read the actual comparison/validation logic in the
   disassembly or decompiled source, and independently derived/recomputed

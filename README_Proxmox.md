@@ -13,6 +13,16 @@ proven end-to-end: clone → start → guest-exec → destroy, tested both local
 on the Proxmox host and cross-machine from the Mac Studio. Remaining: wire
 into an actual Hermes skill (see [Open items](#open-items)).
 
+**Before anything else, read [README.md's "Architecture at a
+glance"](README.md#architecture-at-a-glance)** — it covers the full
+picture this document assumes: the Docker sandbox (shared between primary
+and subagents, internet-capable, free to install tools) versus this
+Windows VM (air-gapped, fixed toolkit, reachable only through the bridge).
+The short version, specific to this VM: **no internet, ever** (`vmbr1` has
+no physical network uplink at all), and **no ability to install new
+tools at runtime** — the toolkit below is fixed at template-build time by
+a human operator; an agent cannot add to it mid-task.
+
 ## Repo layout addition
 
 ```
@@ -157,7 +167,7 @@ qm set 9000 --delete ide2
 | Sysinternals Suite | Portable, no installer. **Accept each tool's EULA once interactively before snapshotting** — it's a blocking modal that would hang unattended `guest-exec` calls otherwise |
 | x64dbg (snapshot build) | Portable. Confirm Windows Defender isn't flagging it before snapshotting (unsigned-binary heuristic false positives happen occasionally) |
 | PE-bear | Portable; vs17 build needs VC++ 2015-2022 Redistributable installed alongside it |
-| Ghidra | Needs a JDK first (Temurin/Eclipse Adoptium, matching whatever version the specific Ghidra release states) — **the release zip extracts with an extra top-level folder** (`ghidra_X.X_PUBLIC/`); move contents up one level or `ghidraRun.bat` won't be where expected. **Does not handle .NET/MSIL binaries well** — use ilspycmd instead for those (see below). Ghidra 12.x also changed its Python scripting runtime: `.py` postScripts written in classic Jython style need `# @runtime Jython` as the first line, and even then require the Jython extension to actually be installed separately — PyGhidra (the new default) needs its own headless bootstrap that isn't configured out of the box. In practice, plain `strings.exe` or `ilspycmd` got useful results faster than fighting Ghidra's scripting setup |
+| Ghidra | Needs a JDK first (Temurin/Eclipse Adoptium, matching whatever version the specific Ghidra release states) — **the release zip extracts with an extra top-level folder** (`ghidra_X.X_PUBLIC/`); move contents up one level or `ghidraRun.bat` won't be where expected. **Does not handle .NET/MSIL binaries well** — use ilspycmd instead for those (see below). **For scripting: use PyGhidra as a plain Python package, not `analyzeHeadless.bat -postScript`.** Ghidra 12.x's classic `analyzeHeadless -postScript some.py` path is genuinely broken in practice — `.py` scripts default to PyGhidra's runtime, which isn't bootstrapped for headless use, and `# @runtime Jython` just hits a different error since the Jython extension isn't installed either. The actual fix, confirmed working: install the `pyghidra` Python package **offline** using the wheel Ghidra ships with itself — `python -m pip install --no-index -f C:\Tools\ghidra\Ghidra\Features\PyGhidra\pypkg\dist pyghidra` — then write plain Python scripts that `import pyghidra; pyghidra.start(); with pyghidra.open_program(path) as flat_api: ...` and run them directly via `python.exe`, never through `analyzeHeadless.bat` at all. See the skill's `pyghidra_tool.py` and the `ghidra-inventory`/`ghidra-decompile` subcommands |
 | .NET SDK + ilspycmd | For decompiling .NET (MSIL/CIL) binaries back to readable C# — see the `decompile` skill subcommand. Install the .NET SDK (not just the runtime) via the offline installer, then `dotnet tool install --global ilspycmd --tool-path C:\Tools\ilspy` (use `--tool-path`, not a plain `--global` install — the default global-tools location is under the per-user profile, which SYSTEM-context `guest-exec` calls can't see, same PATH pitfall as Python earlier). Add `C:\Tools\ilspy` to the machine-wide PATH |
 | Python | Install **for all users**, not per-user — Hermes's later `guest-exec` calls run in the **SYSTEM** account context, which never sees a per-user `PATH` entry. `python-3.13.15-amd64.exe /passive InstallAllUsers=1 PrependPath=1` |
 
