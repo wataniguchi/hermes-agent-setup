@@ -8,6 +8,14 @@ metadata:
     category: security
 ---
 
+**Static analysis (`ghidra-inventory`, `ghidra-decompile`, .NET
+decompile) has been superseded by the Docker-native
+`binary-static-analysis` skill** — it runs the same underlying tools
+directly in the sandbox, with no VM clone wait and no bridge dependency
+at all. Use this skill only when you genuinely need to *run* a Windows
+binary and observe its live behavior (`exec`, `gui-probe`) — not for
+inventorying or decompiling one.
+
 # Windows Binary Analysis
 
 ## When to Use
@@ -254,48 +262,12 @@ disk space on the `hot-ssd` storage pool with no automatic cleanup.
   EULAs were pre-accepted when the template was built — but for any
   Sysinternals tool NOT explicitly pre-accepted, add `-accepteula` to the
   command rather than risk a silent blocking dialog.
-- **Run `ghidra-inventory` before forming a hypothesis about what a binary
-  needs — printable strings alone are not a complete picture.** A static
-  data table (e.g. multiple separate answer/validation arrays) has no
-  printable-string representation. This has caused a real failure:
-  concluding a challenge needed exactly as many correct inputs as there
-  were visible question strings, when the actual data structure had more
-  entries than that — the extra one was only visible in the full data
-  inventory, never in `strings` output.
-- **A claimed algorithm or transform must be verified by actually running
-  it, not by reasoning about what it would produce.** If you decompile a
-  function that encodes/hashes/transforms data, transcribe it faithfully
-  into a real script and execute it — compare its actual output against
-  the actual target bytes. Describing what the algorithm "should" do,
-  however confidently, is not verification and is not an acceptable
-  substitute for running it.
-- **Never describe the contents, logic, or purpose of a named function
-  unless you decompiled that exact function yourself, in this same
-  session, and can show the real output.** Naming a function correctly
-  (e.g. from an inventory listing or a cross-reference) is not the same
-  as knowing what it contains. This has happened for real: a function
-  was cited by name and its behavior confidently described, while the
-  actual `ghidra-decompile` call in that same trace was for a completely
-  different function — the description was invented, not read. If you
-  reference a function's contents in your reasoning or your final answer,
-  the corresponding `ghidra-decompile` call for that specific function
-  must appear earlier in the same session, and you should be able to
-  paste its real output on request.
-- **If a derivation attempt produces a genuinely non-meaningful result
-  (e.g. decrypted bytes that aren't valid text, a decompressed value that
-  isn't sensible), that means your method, key, offset, or algorithm is
-  wrong — it is not license to substitute a culturally familiar
-  "plausible" answer instead.** This has happened for real: an attempt to
-  decrypt a stored answer produced invalid, non-ASCII output; rather than
-  going back to find what was actually wrong with the derivation (wrong
-  key, wrong offset, wrong transform), the response was quietly replaced
-  with "Man" — the famous, textbook answer to the Sphinx's riddle — when
-  the binary's actual expected string was "Human." A well-known riddle's
-  canonical answer is not evidence about what THIS SPECIFIC binary
-  expects; every riddle in a CTF challenge is a deliberate opportunity to
-  plant exactly this kind of trap. When a derivation stalls, say so
-  explicitly and go find the actual bug in your method — do not fill the
-  gap with trivia and present it as a finding.
+- **The general verification/anti-fabrication rules now live in
+  `AGENTS.md`** (exhaustive inventory before hypothesis, never describe
+  something you haven't actually inspected, verify by running rather than
+  reasoning, don't substitute trivia for a stalled derivation) — they
+  apply here exactly as written there; not repeated in full below to
+  avoid drift between two copies.
 - **Never report a flag you have not verified.** Verification means one of:
   (a) you found and read the actual comparison/validation logic in the
   disassembly or decompiled source, and independently derived/recomputed
