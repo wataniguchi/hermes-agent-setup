@@ -207,7 +207,8 @@ RUN pip install --no-cache-dir \
     stegoveritas \
     pefile \
     pyelftools \
-    capstone
+    capstone \
+    beautifulsoup4
 
 # stegoveritas has its own post-install dependency-fetch step for some
 # submodules — VERIFY whether `stegoveritas_install_deps` (or similar,

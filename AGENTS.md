@@ -100,3 +100,18 @@ is a deliberate opportunity to plant exactly this kind of trap. When a
 derivation stalls, say so explicitly and go find the actual bug in your
 method, rather than filling the gap with trivia and presenting it as a
 finding.
+
+## Current CTF challenge scope
+
+Active platform: ksnctf (https://ksnctf.sweetduet.info/)
+Allowed attack target: ctfq.u1tramarine.blue — per the platform's own
+posted policy, never attack anything outside this host for live-target
+(web-app or SSH) challenges. Downloadable-file challenges have no such
+restriction, since analysis happens locally, not against the platform's
+own infrastructure.
+
+When using `challenge-fetch` or any downstream attack tool, pass this
+scope explicitly (e.g. `--scope ctfq.u1tramarine.blue`) — do not assume
+any tool already knows it, and do not try to derive it from a challenge
+page yourself. Update this section directly when moving to a different
+platform (e.g. HTB) — no code changes should be needed anywhere else.
