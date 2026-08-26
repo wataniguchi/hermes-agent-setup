@@ -1,5 +1,5 @@
 ---
-name: challenge-fetch
+name: ksnctf-fetch
 description: Fetch a CTF challenge page, classify its delivery mode, and stage files/targets for analysis
 version: 1.0.0
 metadata:
@@ -20,7 +20,7 @@ platform changes; the script never hardcodes or auto-parses it.
 ## Usage
 
 ```
-python3 .../challenge_fetch.py fetch <problem_url> --scope <allowed_host> [--output-dir <dir>]
+python3 .../ksnctf_fetch.py fetch <problem_url> --scope <allowed_host> [--output-dir <dir>]
 ```
 
 Fetches the page and reports, as structured JSON:
