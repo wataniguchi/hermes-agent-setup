@@ -115,6 +115,36 @@ every step, check the simplest interpretation (is this already
 readable? does it already match the expected answer format?) before
 committing to further transformation.
 
+**If analysis reveals a reference to a live network endpoint (a URL, a
+host:port, a captured exchange to continue or replay), actually attempt
+the connection or replay before guessing or concluding you're stuck.**
+This has happened for real: analyzing a downloaded packet capture
+revealed it referenced a live host, and rather than actually trying to
+connect or replay the captured exchange against it, the response went
+straight to guessing candidate answers. Replaying or continuing a
+captured network exchange against the real host is a well-established,
+often-intended CTF technique — the static file is frequently deliberately
+insufficient on its own, and the whole point is to actually engage the
+live target with what you learned from it. A cached reachability
+determination from earlier in a session (e.g. from session
+initialization) is not necessarily still accurate the moment a specific
+new technique makes reachability relevant again — when it actually
+matters for a real next step, re-check live rather than trust a
+possibly-stale earlier result.
+
+**A cheap, directly available verification step is never optional —
+this includes connectivity, not just technical derivation.** This has
+happened for real: analysis of a downloaded file revealed it needed
+access to a specific host/URL, and rather than simply attempting a real
+connection to find out whether it's actually reachable right now, the
+response went straight to guessing instead. Trying the connection costs
+almost nothing and immediately resolves the uncertainty — guessing does
+not. This applies even when a host was previously determined
+unreachable earlier in the same session: that status can go stale over
+time, and a specific new need to reach it is exactly the moment to
+re-verify live, not to treat an old cached assumption as a permanent
+fact to build further guessing on top of.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)
