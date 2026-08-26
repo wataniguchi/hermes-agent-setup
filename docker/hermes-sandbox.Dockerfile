@@ -305,6 +305,72 @@ RUN curl -sSL -o /tmp/zap.tar.gz \
     && ln -s /opt/zap/zap.sh /usr/local/bin/zap \
     && rm /tmp/zap.tar.gz
 
+# ---------------------------------------------------------------------------
+# rockyou.txt — the standard password wordlist for john/hashcat dictionary
+# attacks. Confirmed genuinely missing from this image via real use: a
+# hash-cracking CTF problem had both john and hashcat available, but
+# nothing to actually crack with, which contributed to a real failure
+# (the model fell back to guessing plausible-sounding words as flag
+# candidates instead). Only rockyou-derived artifacts existed before
+# this (hashcat's rules/masks, which need a wordlist to apply to, not a
+# wordlist themselves) — the actual dictionary was never installed.
+#
+# Source confirmed directly, not a guessed URL: zacheller/rockyou, a
+# well-known GitHub mirror (255 stars, 72 forks at time of writing)
+# whose actual file listing was checked before use. Installed at the
+# conventional Kali Linux path (/usr/share/wordlists/rockyou.txt) so
+# any standard CTF guide's casual reference to that path just works.
+RUN mkdir -p /usr/share/wordlists \
+    && curl -sSL -o /tmp/rockyou.txt.tar.gz \
+    "https://raw.githubusercontent.com/zacheller/rockyou/master/rockyou.txt.tar.gz" \
+    && tar -xzf /tmp/rockyou.txt.tar.gz -C /usr/share/wordlists \
+    && rm /tmp/rockyou.txt.tar.gz \
+    && chmod a+r /usr/share/wordlists/rockyou.txt
+# VERIFY at build time: confirm the extracted file is actually named
+# rockyou.txt directly (not nested in a subdirectory) and is a real,
+# complete wordlist (wc -l should show roughly 14 million lines) — this
+# specific archive's internal structure wasn't independently confirmed
+# beyond the repo listing showing the file exists.
+
+# ---------------------------------------------------------------------------
+# john's session/log directory bug — CONFIRMED, found via real use
+# ---------------------------------------------------------------------------
+# john resolves its .john/ session and log directory relative to
+# whatever directory it's invoked from, and never creates it
+# automatically — every invocation failed with "open: .john/john.log:
+# No such file or directory" until this was created by hand. Separately
+# confirmed: despite this image's own WORKDIR /workspace (below),
+# Hermes's actual interactive sessions land in /root — apparently
+# docker exec's login-shell behavior overrides the image's WORKDIR,
+# which isn't something fixable from inside this Dockerfile. Given
+# that, pre-create .john in both places john might realistically run
+# from. /root itself stays locked down (0700, root-only, a genuine and
+# correct restriction) — only this one specific subdirectory is carved
+# out as writable, not the whole home directory.
+RUN mkdir -p /root/.john /workspace/.john \
+    && chmod a+rwx /root/.john /workspace/.john
+
+# ---------------------------------------------------------------------------
+# hashcat segfault — HONESTLY UNVERIFIED attempted fix, not a confirmed one
+# ---------------------------------------------------------------------------
+# Confirmed via real use: hashcat segfaults even on `hashcat -b` (its
+# own built-in self-benchmark, no external input at all), meaning the
+# crash happens during backend/device initialization, not from
+# anything specific to a given problem's data. Best-supported
+# hypothesis, not independently confirmed: hashcat requires a working
+# OpenCL runtime to enumerate compute devices even for CPU-only
+# operation, and nothing in this image ever installed one — combined
+# with the arm64-under-amd64-emulation layer this whole image already
+# runs under (see the Ghidra decompiler fix above), this is a
+# plausible crash surface. pocl is the standard CPU-based OpenCL
+# implementation. This has NOT been build-tested — verify hashcat -b
+# actually completes without segfaulting before trusting this fix; if
+# it still crashes, `john` is the confirmed-working alternative for
+# password/hash cracking in this environment regardless.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pocl-opencl-icd \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
 
 # Defensive blanket fix, added after finding the ilspycmd permission bug

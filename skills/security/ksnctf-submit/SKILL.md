@@ -85,3 +85,10 @@ separately confirm an obviously-wrong candidate for the same problem
 comes back `"result": false` — both against a problem with a
 known-in-advance answer, so there's no ambiguity about whether the
 script itself is working correctly.
+
+Also worth confirming the network-error path actually behaves as
+designed, not just reasoned through: temporarily point `SUBMIT_URL` at
+an unreachable address (or run this while offline) and confirm the
+output shows `"reason": "network_unreachable"` with the attempt log
+genuinely untouched afterward — not a crash, and not a silently consumed
+attempt.

@@ -101,6 +101,20 @@ derivation stalls, say so explicitly and go find the actual bug in your
 method, rather than filling the gap with trivia and presenting it as a
 finding.
 
+**In a multi-step transformation chain, check whether you've already
+arrived at the answer before assuming another step is needed.** This
+has happened for real: a challenge involving many layers of encoding
+was correctly unwrapped almost completely — each layer identified and
+decoded correctly — but at the final layer, rather than simply checking
+whether the decoded bytes were already readable plain text, the response
+assumed more transformation must be needed (trying further encodings,
+ciphers, padding adjustments) and eventually gave up despite having
+likely already reached the answer. A puzzle's own theme or title (e.g.
+implying "many layers") is not license to assume unbounded depth — at
+every step, check the simplest interpretation (is this already
+readable? does it already match the expected answer format?) before
+committing to further transformation.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)
