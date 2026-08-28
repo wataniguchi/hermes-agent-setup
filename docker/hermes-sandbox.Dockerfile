@@ -371,6 +371,92 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pocl-opencl-icd \
     && rm -rf /var/lib/apt/lists/*
 
+# ---------------------------------------------------------------------------
+# gcc-multilib / g++-multilib — needed for 32-bit (-m32) compilation
+# ---------------------------------------------------------------------------
+# Confirmed genuinely needed via real use: a challenge's C source has
+# architecture-dependent behavior (sizeof(unsigned long) differs between
+# 32-bit and 64-bit builds, changing how many elements an MT19937 seed
+# array actually gets populated with). Reproducing the challenge's
+# intended behavior requires compiling with -m32, which needs these
+# 32-bit libc/headers — confirmed missing via a real `gcc -m32` failure
+# in this exact scenario.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-multilib g++-multilib \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Passwordless sudo for the runtime user — lets the agent self-install
+# what it discovers it needs mid-session, without giving up host file
+# ownership
+# ---------------------------------------------------------------------------
+# This image has no USER directive at all — every RUN above executes as
+# root during build, and the non-root behavior seen at runtime (UID 501)
+# comes entirely from Hermes's own docker_run_as_host_user: true setting
+# applying a --user flag at container-launch time, not from anything
+# baked into this image. That means the actual runtime UID isn't fixed
+# or knowable at build time — it's whatever host user launches Hermes —
+# so this rule is written to apply broadly (ALL, not a specific
+# username/UID) rather than hardcoded to 501, which happens to be
+# correct for this specific host but wouldn't necessarily generalize.
+#
+# Deliberate design choice, not the only option: full root (dropping
+# docker_run_as_host_user entirely) was considered and rejected — it
+# would make every file the agent creates in /workspace show up
+# root-owned on the host, needing sudo/chown on the HOST side just to
+# read or delete the agent's own output. This preserves that host-side
+# ergonomic entirely while still letting the in-container user reach
+# root for genuinely-needed installs (confirmed necessary via the
+# gcc-multilib case above, and expected to recur for other
+# not-yet-anticipated packages).
+#
+# Real, accepted tradeoff: this gives the agent open-ended ability to
+# modify the container's own OS state, not just install packages —
+# acceptable here since this is a disposable, single-purpose local CTF
+# sandbox with no other real users and nothing host-sensitive reachable
+# from inside it, but worth keeping in mind if this image is ever reused
+# for something with different trust assumptions.
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+    && echo "ALL ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/hermes-sandbox-nopasswd \
+    && chmod 0440 /etc/sudoers.d/hermes-sandbox-nopasswd \
+    && rm -rf /var/lib/apt/lists/*
+# VERIFY at build/run time: confirm `sudo whoami` actually returns root
+# when run as the non-root runtime UID — this has not been build-tested,
+# same "verify before trusting" standard as everything else in this file.
+
+# ---------------------------------------------------------------------------
+# Explicit named user at UID 501 — matches this host's actual runtime UID
+# ---------------------------------------------------------------------------
+# Confirmed via this whole project's own terminal transcripts: every
+# session shows a "I have no name!@<hash>:..." prompt — the exact,
+# direct symptom of a numeric UID (501, applied by Hermes's own
+# docker_run_as_host_user: true setting) with no matching /etc/passwd
+# entry in this image. Creating a real named user fixes that directly,
+# and has two further benefits:
+# - Closes a real gap in this project's own manual testing: several
+#   earlier verification commands (e.g. checking rockyou.txt, hashcat)
+#   used plain `docker run` with no --user flag, meaning they silently
+#   ran as root rather than matching Hermes's real non-root runtime
+#   identity. A default USER here means plain `docker run` now matches
+#   real behavior automatically.
+# - Gives $HOME a real, writable location. Several earlier fixes in
+#   this file (ilspycmd's --tool-path workaround, john's dual .john
+#   directory) exist specifically because the runtime user had no real
+#   home directory to resolve — this removes the need for that pattern
+#   going forward for any future tool.
+#
+# UNVERIFIED: the base image may already define a user at UID 501,
+# which would make useradd fail outright at build time — this hasn't
+# been checked. If the build fails here, inspect the base image's
+# existing /etc/passwd for a conflicting UID and either remove/reassign
+# it or pick a different approach.
+#
+# The broad sudoers rule above is kept as-is, not narrowed to this named
+# user specifically — it remains the correct, portable fallback in case
+# a different host's own UID (not 501) ever applies, since this
+# Dockerfile has no way to know that in advance.
+RUN useradd -u 501 -m -s /bin/bash hermes
+
 WORKDIR /workspace
 
 # Defensive blanket fix, added after finding the ilspycmd permission bug
@@ -380,5 +466,26 @@ WORKDIR /workspace
 # most of what's installed above — but cheap insurance against any other
 # install step having silently landed in a non-root-accessible state,
 # rather than assuming everything else is fine without having explicitly
-# verified each one under the real non-root runtime user.
+# verified each one under the real non-root runtime user. Must run
+# before USER hermes below — everything in /opt was installed as root,
+# and a non-root user cannot chmod files it doesn't own, even to make
+# them more permissive.
 RUN chmod -R a+rX /opt
+
+# CONFIRMED BUG, found via real build-and-test: creating the user above
+# is not the same as actually using it. Without this directive, every
+# plain `docker run` still defaulted to root regardless — the useradd
+# step alone had no effect on the image's actual runtime identity.
+# Placed as the LAST directive in the file, after WORKDIR and the chmod
+# step above — both need root to work correctly; switching users any
+# earlier breaks them.
+#
+# Note: this bakes in GID 1001 (useradd's auto-assigned group), not
+# necessarily matching any specific host GID — this is expected to be
+# harmless in practice, since Hermes's own docker_run_as_host_user
+# setting passes its own explicit --user flag at actual runtime anyway,
+# overriding whatever this image's own default says. This baked-in
+# default only matters for the "plain docker run with no --user flag"
+# manual-testing convenience case, where GID matching isn't the
+# significant part.
+USER hermes

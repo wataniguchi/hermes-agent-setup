@@ -145,6 +145,26 @@ time, and a specific new need to reach it is exactly the moment to
 re-verify live, not to treat an old cached assumption as a permanent
 fact to build further guessing on top of.
 
+**Before concluding a problem is genuinely unsolvable, abstract its
+actual technical requirement into general terms and search for that —
+not just the specific problem's own name.** This is a distinct,
+mandatory step beyond searching for a particular challenge's writeup
+(already established as legitimate practice): even when no writeup
+exists for the exact challenge in front of you, the underlying
+technique it requires is very often a well-documented, named category
+of attack with existing public research behind it. This has happened
+for real: a challenge required recovering a PRNG's internal state from
+its output alone, with the seed deliberately withheld — the actual
+requirement is a well-known, named technique ("MT19937 state recovery
+from output", "PRNG state reconstruction") with real prior research and
+tooling — but the session concluded the problem was unsolvable without
+ever restating what it actually needed in general, algorithm-level
+terms and searching for that description specifically. Before reporting
+a genuine dead end: state the core technical requirement in language
+that would apply to *any* problem needing the same underlying technique,
+not just this one, and search for that — this comes before concluding
+anything is genuinely beyond reach, not after.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)

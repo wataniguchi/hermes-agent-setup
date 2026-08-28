@@ -43,6 +43,17 @@ Hard limits, enforced in code, not just documented in this docstring:
   from a real wrong-flag result and reported with its own distinct
   status, rather than either crashing or silently consuming one of the
   5 guarded attempts.
+- Resubmitting the exact same candidate already confirmed wrong for a
+  problem is refused unconditionally, before any network call — this
+  has happened for real (the same wrong guess submitted twice, wasting
+  a guarded attempt for zero new information) and there is no
+  circumstance where it's the right move.
+- A real wrong result at attempt 3 or 4 comes back with an escalating
+  strategy_warning field urging reconsideration of the whole approach,
+  not just another guess — a flat "wrong" result was confirmed, via
+  actual use, to give no signal beyond "try again," which directly
+  contributed to real guessing spirals (one problem burned all 5
+  attempts on unrelated words before this existed).
 """
 import sys
 import os
@@ -95,7 +106,7 @@ def save_log(log: dict):
         json.dump(log, f, indent=2)
 
 
-def check_guardrail(problem_id: str, log: dict):
+def check_guardrail(problem_id: str, candidate: str, log: dict):
     """Returns an error message (string) if submission should be
     refused, or None if it's allowed to proceed."""
     attempts = log.get(problem_id, [])
@@ -110,6 +121,25 @@ def check_guardrail(problem_id: str, log: dict):
             "the right move is to re-verify your method against the "
             "actual challenge, not submit another guess."
         )
+
+    # CONFIRMED real failure, found via actual use: the exact same
+    # already-rejected candidate was resubmitted for no new reason,
+    # burning a guarded attempt for zero new information. No
+    # circumstance justifies this — refuse unconditionally and for
+    # free, before any network call, rather than rely on the caller
+    # remembering to check its own history first.
+    for prior in attempts:
+        if prior["candidate"] == candidate and prior["result"] is False:
+            return (
+                f"REFUSED: {candidate!r} was already submitted for "
+                f"problem {problem_id} at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(prior['timestamp']))} "
+                "and confirmed WRONG. Resubmitting the exact same "
+                "candidate gives zero new information and wastes a "
+                "guarded attempt. Derive something genuinely different, "
+                "or reconsider your approach entirely — do not resubmit "
+                "this value."
+            )
 
     if attempts:
         elapsed = time.time() - attempts[-1]["timestamp"]
@@ -139,6 +169,33 @@ def cmd_submit(problem_id: str, candidate: str):
         }, indent=2))
         sys.exit(1)
 
+    # CONFIRMED real failure, found via actual use: a genuinely correct
+    # derivation (FLAG_aSiuJHSLfzoQkszD) was submitted as
+    # FLAG_FLAG_aSiuJHSLfzoQkszD — the FLAG_ prefix concatenated onto an
+    # answer that already had one, rather than replacing it. This burned
+    # a real guarded attempt on a trivial formatting slip, not a wrong
+    # derivation — worth catching locally before it ever reaches the
+    # network, same as the shape check above.
+    if candidate.startswith("FLAG_FLAG_"):
+        corrected = candidate
+        while corrected.startswith("FLAG_FLAG_"):
+            corrected = corrected[len("FLAG_"):]
+        print(json.dumps({
+            "submitted": False,
+            "reason": (
+                f"Candidate {candidate!r} has the FLAG_ prefix repeated "
+                "— refused before any network call. This is almost "
+                "certainly a formatting error, not a different answer: "
+                "your derivation likely already produced "
+                f"{corrected!r}, and FLAG_ got prepended a second time "
+                "on top of it. Submit the corrected version directly — "
+                "do not treat this as a wrong derivation requiring a "
+                "new approach."
+            ),
+            "corrected_candidate": corrected,
+        }, indent=2))
+        sys.exit(1)
+
     try:
         int(problem_id)
     except ValueError:
@@ -151,7 +208,7 @@ def cmd_submit(problem_id: str, candidate: str):
         sys.exit(1)
 
     log = load_log()
-    refusal = check_guardrail(problem_id, log)
+    refusal = check_guardrail(problem_id, candidate, log)
     if refusal:
         print(json.dumps({"submitted": False, "reason": refusal}, indent=2))
         sys.exit(1)
@@ -208,12 +265,62 @@ def cmd_submit(problem_id: str, candidate: str):
     save_log(log)
 
     attempts_used = len(log[problem_id])
-    print(json.dumps({
+    result_obj = {
         "submitted": True,
         "result": data.get("result"),
         "attempts_used": attempts_used,
         "attempts_remaining": MAX_ATTEMPTS_PER_PROBLEM - attempts_used,
-    }, indent=2))
+    }
+
+    # CONFIRMED real failure pattern, found via actual use: a flat
+    # "result: false" gives no signal beyond "try again" — and in
+    # practice this led directly to guessing spirals (one problem burned
+    # all 5 attempts on unrelated words; another burned 4 before being
+    # caught manually). A wrong result at attempt 3+ is real evidence
+    # the current APPROACH is likely flawed, not just this specific
+    # guess — escalate the message accordingly rather than reporting it
+    # identically to a first wrong attempt.
+    if data.get("result") is False:
+        if attempts_used == 3:
+            result_obj["strategy_warning"] = (
+                "This is your 3rd wrong attempt on this problem. That's "
+                "real evidence your current APPROACH may be flawed, not "
+                "just this specific guess. STOP before submitting again: "
+                "what specific, traced evidence supports your method — "
+                "not just this candidate, the whole approach? If you're "
+                "choosing candidates based on theme, vibe, or a plausible-"
+                "sounding word rather than something you actually derived "
+                "from the challenge's real content, that is the problem. "
+                "Go find the real mechanism, or search for a public "
+                "writeup, before trying again."
+            )
+        elif attempts_used == 4:
+            result_obj["strategy_warning"] = (
+                "This is your 4th wrong attempt — only 1 remains before "
+                "this problem is PERMANENTLY locked (a human must reset "
+                "it; you cannot). Do not spend it on another guess. If "
+                "you do not have a rigorously derived, verified answer "
+                "right now, do not submit again — research a public "
+                "writeup for this specific problem, or move on to a "
+                "different problem and come back once you actually have "
+                "one."
+            )
+        elif attempts_used >= MAX_ATTEMPTS_PER_PROBLEM:
+            # CONFIRMED GAP: the two branches above stopped at attempt 4,
+            # leaving the actual final attempt — the one where a wrong
+            # result means permanent exhaustion — with no warning message
+            # at all, despite being the single most important moment for
+            # one to appear.
+            result_obj["strategy_warning"] = (
+                f"This was your {attempts_used}th and FINAL attempt for "
+                "this problem. It is now PERMANENTLY EXHAUSTED — no "
+                "further submissions will be accepted, and only a human "
+                "editing the log file directly can reset it. Move on to "
+                "a different problem. Do not try to argue, rephrase, or "
+                "find a way around this — there isn't one."
+            )
+
+    print(json.dumps(result_obj, indent=2))
 
 
 def main():
