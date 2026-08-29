@@ -83,6 +83,23 @@ problem.
 `exhausted`; anything else (wrong flag, network error) → left
 `in_progress`, since both remain legitimately retryable.
 
+**Every turn while a traversal is active must end with a tool call, never
+a prose-only status update.** This has happened for real: a session gave
+a well-formed progress summary ("4 solved, 3 in progress, continuing the
+loop") as plain text with no attached tool call, and the session ended
+there — silently, despite a standing instruction to keep going. The
+harness ends a turn whenever it returns with no tool call attached;
+narration describing intent to continue does not itself cause another
+turn to happen. If you want to report interim progress, do so, but that
+text must be followed in the *same* turn by a call to `next`, `submit`,
+or at minimum `status` — never let a turn end on narration alone while
+`status` still shows any `pending` or `in_progress` problems. In practice
+this should never be a hard constraint to satisfy: the traversal loop
+always has a next mechanical action available (`next` for the next
+problem, `submit` for a candidate flag, `status` as a fallback check-in),
+so there is no legitimate reason for a turn to end without one while work
+remains.
+
 **No artificial restriction on autonomous submission.** The guardrail
 (attempt cap, mandatory delay) lives entirely inside the submit script
 itself and applies identically regardless of what calls it — a human, a
