@@ -83,21 +83,25 @@ problem.
 `exhausted`; anything else (wrong flag, network error) → left
 `in_progress`, since both remain legitimately retryable.
 
-**Every turn while a traversal is active must end with a tool call, never
-a prose-only status update.** This has happened for real: a session gave
-a well-formed progress summary ("4 solved, 3 in progress, continuing the
-loop") as plain text with no attached tool call, and the session ended
-there — silently, despite a standing instruction to keep going. The
-harness ends a turn whenever it returns with no tool call attached;
-narration describing intent to continue does not itself cause another
-turn to happen. If you want to report interim progress, do so, but that
-text must be followed in the *same* turn by a call to `next`, `submit`,
-or at minimum `status` — never let a turn end on narration alone while
-`status` still shows any `pending` or `in_progress` problems. In practice
-this should never be a hard constraint to satisfy: the traversal loop
-always has a next mechanical action available (`next` for the next
-problem, `submit` for a candidate flag, `status` as a fallback check-in),
-so there is no legitimate reason for a turn to end without one while work
+**Never produce a prose-only turn while a traversal is active — not even
+with the intention of following it with a tool call.** This has happened
+for real, twice, in two different ways: once as plain narration with no
+tool call at all ("4 solved, 3 in progress, continuing the loop"), and
+once *after* an earlier version of this rule permitted narration
+followed by a tool call in the same turn — the permission to narrate at
+all was itself the opening through which the trailing tool call got
+dropped. The harness ends a turn whenever it returns with no tool call
+attached; describing an intent to continue does not itself cause another
+turn to happen, and relying on the model to remember to append a call
+after narrating has already failed once in practice. The safe version of
+this rule has no exception: do not write "here's my progress so far" or
+any similar interim status update mid-traversal, full stop. Call `next`,
+`submit`, or `status` directly instead, and let that call's own output
+carry whatever state needs conveying. In practice this should never be a
+hard constraint to satisfy: the traversal loop always has a next
+mechanical action available (`next` for the next problem, `submit` for a
+candidate flag, `status` as a fallback check-in), so there is no
+legitimate reason to narrate instead of calling one of them while work
 remains.
 
 **No artificial restriction on autonomous submission.** The guardrail
