@@ -24,7 +24,23 @@ Usage:
     python3 ctf_traversal.py init --discover <path> --solver <path> --submit <path> --scope <host>
     python3 ctf_traversal.py next
     python3 ctf_traversal.py submit <problem_id> <candidate_flag>
+    python3 ctf_traversal.py submit <problem_id> --candidate-file <path>
     python3 ctf_traversal.py status
+
+CONFIRMED real failure that motivated --candidate-file: a genuinely
+correct flag (FLAG_This_is_right_:)) was submitted as a raw shell
+argument via the agent's own terminal tool, and the unescaped ')' broke
+bash's `eval` parsing before this script ever ran — a real, correct
+answer lost purely to shell syntax, unrelated to whether the derivation
+was right. --candidate-file sidesteps this entirely: write the exact
+candidate to a file via the write_file tool (which never touches a
+shell), then pass the file's path — a plain filename is virtually
+always shell-safe regardless of what characters the candidate itself
+contains. This script's own internal call to the underlying submit
+script was never actually at risk — it already used Python's list-form
+subprocess.run, which bypasses the shell entirely; the exposure was
+specifically in how an agent invokes THIS script's own CLI via a raw
+shell command.
 
 State persists in /workspace/.ctf_traversal_state.json, so it survives
 across sessions and separate script invocations — `init` needs to run
@@ -231,6 +247,12 @@ def cmd_next():
                 "Once you have a genuinely derived, self-verified "
                 "candidate, submit it via: "
                 "python3 ctf_traversal.py submit " + problem_id + " <candidate_flag>"
+                " (or, if the candidate might contain shell-special "
+                "characters like parentheses or quotes, write it to a "
+                "file via write_file and use --candidate-file <path> "
+                "instead — a raw shell argument with unescaped special "
+                "characters has broken a genuinely correct submission "
+                "before)."
             ),
         }, indent=2))
         return
@@ -305,7 +327,23 @@ def main():
 
     p_submit = sub.add_parser("submit")
     p_submit.add_argument("problem_id")
-    p_submit.add_argument("candidate")
+    p_submit.add_argument(
+        "candidate", nargs="?", default=None,
+        help="The candidate flag directly, as a plain argument. Omit "
+             "this and use --candidate-file instead if the candidate "
+             "might contain shell-special characters (parentheses, "
+             "quotes, etc.) — confirmed real failure: a genuinely "
+             "correct flag containing ')' broke bash's eval parsing "
+             "before this script ever ran.",
+    )
+    p_submit.add_argument(
+        "--candidate-file", default=None,
+        help="Path to a file — written via the write_file tool, never a "
+             "shell command — whose exact content (whitespace stripped) "
+             "is the candidate flag. Use this instead of the positional "
+             "candidate whenever the candidate might contain characters "
+             "a shell would misinterpret.",
+    )
 
     sub.add_parser("status")
 
@@ -316,7 +354,34 @@ def main():
     elif args.command == "next":
         cmd_next()
     elif args.command == "submit":
-        cmd_submit(args.problem_id, args.candidate)
+        if args.candidate_file:
+            if args.candidate is not None:
+                print(json.dumps({
+                    "submitted": False,
+                    "reason": "Provide either a positional candidate or "
+                              "--candidate-file, not both.",
+                }, indent=2))
+                sys.exit(1)
+            try:
+                with open(args.candidate_file) as f:
+                    candidate = f.read().strip()
+            except OSError as e:
+                print(json.dumps({
+                    "submitted": False,
+                    "reason": f"Could not read --candidate-file "
+                              f"{args.candidate_file!r}: {e}",
+                }, indent=2))
+                sys.exit(1)
+        elif args.candidate is not None:
+            candidate = args.candidate
+        else:
+            print(json.dumps({
+                "submitted": False,
+                "reason": "Provide either a positional candidate or "
+                          "--candidate-file.",
+            }, indent=2))
+            sys.exit(1)
+        cmd_submit(args.problem_id, candidate)
     elif args.command == "status":
         cmd_status()
 

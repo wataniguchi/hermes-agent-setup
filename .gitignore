@@ -2,6 +2,7 @@
 *.log
 .DS_Store
 __pycache__
+/workspace-archive/
 # keep empty workspace directory
 /workspace/*
 !/workspace/.gitkeep

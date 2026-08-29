@@ -20,6 +20,18 @@ DEFAULT_KSNCTF_DISCOVER_DIR="$HOME/.hermes/skills/security/ksnctf-discover"
 QWEN_KSNCTF_DISCOVER_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ksnctf-discover"
 DEFAULT_CTF_SOLVER_DIR="$HOME/.hermes/skills/security/ctf-solver"
 QWEN_CTF_SOLVER_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ctf-solver"
+GEMMA_SKILL_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/windows-binary-analysis"
+GEMMA_BINARY_SKILL_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/binary-static-analysis"
+GEMMA_KSNCTF_FETCH_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ksnctf-fetch"
+GEMMA_KSNCTF_SUBMIT_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ksnctf-submit"
+GEMMA_KSNCTF_DISCOVER_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ksnctf-discover"
+GEMMA_CTF_SOLVER_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ctf-solver"
+DEVSTRAL_SKILL_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/windows-binary-analysis"
+DEVSTRAL_BINARY_SKILL_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/binary-static-analysis"
+DEVSTRAL_KSNCTF_FETCH_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/ksnctf-fetch"
+DEVSTRAL_KSNCTF_SUBMIT_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/ksnctf-submit"
+DEVSTRAL_KSNCTF_DISCOVER_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/ksnctf-discover"
+DEVSTRAL_CTF_SOLVER_DIR="$HOME/.hermes/profiles/devstral-experiment/skills/security/ctf-solver"
 
 check() {
   local repo_file="$1"
@@ -73,6 +85,36 @@ check "$REPO/skills/security/windows-binary-analysis/scripts/pyghidra_tool.py" \
       "pyghidra_tool.py (qwen-experiment)"
 
 echo ""
+echo "=== Skill files: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/windows-binary-analysis/SKILL.md" \
+      "$GEMMA_SKILL_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/analyze_windows_binary.py" \
+      "$GEMMA_SKILL_DIR/scripts/analyze_windows_binary.py" \
+      "analyze_windows_binary.py (gemma-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/gui_probe.ps1" \
+      "$GEMMA_SKILL_DIR/scripts/gui_probe.ps1" \
+      "gui_probe.ps1 (gemma-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/pyghidra_tool.py" \
+      "$GEMMA_SKILL_DIR/scripts/pyghidra_tool.py" \
+      "pyghidra_tool.py (gemma-experiment)"
+
+echo ""
+echo "=== Skill files: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/windows-binary-analysis/SKILL.md" \
+      "$DEVSTRAL_SKILL_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/analyze_windows_binary.py" \
+      "$DEVSTRAL_SKILL_DIR/scripts/analyze_windows_binary.py" \
+      "analyze_windows_binary.py (devstral-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/gui_probe.ps1" \
+      "$DEVSTRAL_SKILL_DIR/scripts/gui_probe.ps1" \
+      "gui_probe.ps1 (devstral-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/pyghidra_tool.py" \
+      "$DEVSTRAL_SKILL_DIR/scripts/pyghidra_tool.py" \
+      "pyghidra_tool.py (devstral-experiment)"
+
+echo ""
 echo "=== binary-static-analysis skill: repo -> default profile ==="
 check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
       "$DEFAULT_BINARY_SKILL_DIR/SKILL.md" \
@@ -89,6 +131,24 @@ check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
 check "$REPO/skills/security/binary-static-analysis/scripts/binary_analysis.py" \
       "$QWEN_BINARY_SKILL_DIR/scripts/binary_analysis.py" \
       "binary_analysis.py (qwen-experiment)"
+
+echo ""
+echo "=== binary-static-analysis skill: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
+      "$GEMMA_BINARY_SKILL_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/binary-static-analysis/scripts/binary_analysis.py" \
+      "$GEMMA_BINARY_SKILL_DIR/scripts/binary_analysis.py" \
+      "binary_analysis.py (gemma-experiment)"
+
+echo ""
+echo "=== binary-static-analysis skill: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
+      "$DEVSTRAL_BINARY_SKILL_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/binary-static-analysis/scripts/binary_analysis.py" \
+      "$DEVSTRAL_BINARY_SKILL_DIR/scripts/binary_analysis.py" \
+      "binary_analysis.py (devstral-experiment)"
 
 echo ""
 echo "=== ksnctf-fetch skill: repo -> default profile ==="
@@ -109,6 +169,24 @@ check "$REPO/skills/security/ksnctf-fetch/scripts/ksnctf_fetch.py" \
       "ksnctf_fetch.py (qwen-experiment)"
 
 echo ""
+echo "=== ksnctf-fetch skill: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/ksnctf-fetch/SKILL.md" \
+      "$GEMMA_KSNCTF_FETCH_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/ksnctf-fetch/scripts/ksnctf_fetch.py" \
+      "$GEMMA_KSNCTF_FETCH_DIR/scripts/ksnctf_fetch.py" \
+      "ksnctf_fetch.py (gemma-experiment)"
+
+echo ""
+echo "=== ksnctf-fetch skill: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/ksnctf-fetch/SKILL.md" \
+      "$DEVSTRAL_KSNCTF_FETCH_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/ksnctf-fetch/scripts/ksnctf_fetch.py" \
+      "$DEVSTRAL_KSNCTF_FETCH_DIR/scripts/ksnctf_fetch.py" \
+      "ksnctf_fetch.py (devstral-experiment)"
+
+echo ""
 echo "=== ksnctf-submit skill: repo -> default profile ==="
 check "$REPO/skills/security/ksnctf-submit/SKILL.md" \
       "$DEFAULT_KSNCTF_SUBMIT_DIR/SKILL.md" \
@@ -127,6 +205,24 @@ check "$REPO/skills/security/ksnctf-submit/scripts/submit_flag.py" \
       "submit_flag.py (qwen-experiment)"
 
 echo ""
+echo "=== ksnctf-submit skill: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/ksnctf-submit/SKILL.md" \
+      "$GEMMA_KSNCTF_SUBMIT_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/ksnctf-submit/scripts/submit_flag.py" \
+      "$GEMMA_KSNCTF_SUBMIT_DIR/scripts/submit_flag.py" \
+      "submit_flag.py (gemma-experiment)"
+
+echo ""
+echo "=== ksnctf-submit skill: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/ksnctf-submit/SKILL.md" \
+      "$DEVSTRAL_KSNCTF_SUBMIT_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/ksnctf-submit/scripts/submit_flag.py" \
+      "$DEVSTRAL_KSNCTF_SUBMIT_DIR/scripts/submit_flag.py" \
+      "submit_flag.py (devstral-experiment)"
+
+echo ""
 echo "=== ksnctf-discover skill: repo -> default profile ==="
 check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
       "$DEFAULT_KSNCTF_DISCOVER_DIR/SKILL.md" \
@@ -143,6 +239,24 @@ check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
 check "$REPO/skills/security/ksnctf-discover/scripts/ksnctf_discover.py" \
       "$QWEN_KSNCTF_DISCOVER_DIR/scripts/ksnctf_discover.py" \
       "ksnctf_discover.py (qwen-experiment)"
+
+echo ""
+echo "=== ksnctf-discover skill: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
+      "$GEMMA_KSNCTF_DISCOVER_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/ksnctf-discover/scripts/ksnctf_discover.py" \
+      "$GEMMA_KSNCTF_DISCOVER_DIR/scripts/ksnctf_discover.py" \
+      "ksnctf_discover.py (gemma-experiment)"
+
+echo ""
+echo "=== ksnctf-discover skill: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
+      "$DEVSTRAL_KSNCTF_DISCOVER_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/ksnctf-discover/scripts/ksnctf_discover.py" \
+      "$DEVSTRAL_KSNCTF_DISCOVER_DIR/scripts/ksnctf_discover.py" \
+      "ksnctf_discover.py (devstral-experiment)"
 
 echo ""
 echo "=== ctf-solver skill: repo -> default profile ==="
@@ -169,6 +283,30 @@ check "$REPO/skills/security/ctf-solver/scripts/ctf_traversal.py" \
       "ctf_traversal.py (qwen-experiment)"
 
 echo ""
+echo "=== ctf-solver skill: repo -> gemma-experiment profile ==="
+check "$REPO/skills/security/ctf-solver/SKILL.md" \
+      "$GEMMA_CTF_SOLVER_DIR/SKILL.md" \
+      "SKILL.md (gemma-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_solver.py" \
+      "$GEMMA_CTF_SOLVER_DIR/scripts/ctf_solver.py" \
+      "ctf_solver.py (gemma-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_traversal.py" \
+      "$GEMMA_CTF_SOLVER_DIR/scripts/ctf_traversal.py" \
+      "ctf_traversal.py (gemma-experiment)"
+
+echo ""
+echo "=== ctf-solver skill: repo -> devstral-experiment profile ==="
+check "$REPO/skills/security/ctf-solver/SKILL.md" \
+      "$DEVSTRAL_CTF_SOLVER_DIR/SKILL.md" \
+      "SKILL.md (devstral-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_solver.py" \
+      "$DEVSTRAL_CTF_SOLVER_DIR/scripts/ctf_solver.py" \
+      "ctf_solver.py (devstral-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_traversal.py" \
+      "$DEVSTRAL_CTF_SOLVER_DIR/scripts/ctf_traversal.py" \
+      "ctf_traversal.py (devstral-experiment)"
+
+echo ""
 echo "=== AGENTS.md: repo root (loaded by working directory, not per-profile — no separate deploy step needed as long as both profiles launch from this repo root) ==="
 if [[ -f "$REPO/AGENTS.md" ]]; then
   echo "OK (present):           AGENTS.md"
@@ -187,6 +325,12 @@ fi
 check "$REPO/AGENTS.md" \
       "$HOME/.hermes/profiles/qwen-experiment/AGENTS.md" \
       "AGENTS.md (qwen-experiment profile copy — relevance to Hermes's actual behavior unconfirmed, kept in sync as cheap insurance)"
+check "$REPO/AGENTS.md" \
+      "$HOME/.hermes/profiles/gemma-experiment/AGENTS.md" \
+      "AGENTS.md (gemma-experiment profile copy — same unconfirmed-relevance caveat as above)"
+check "$REPO/AGENTS.md" \
+      "$HOME/.hermes/profiles/devstral-experiment/AGENTS.md" \
+      "AGENTS.md (devstral-experiment profile copy — same unconfirmed-relevance caveat as above)"
 
 echo ""
 echo "=== ksnctf-submit guardrail state: current attempt counts per problem ==="
@@ -216,22 +360,43 @@ grep -A2 "^compression:" "$HOME/.hermes/config.yaml" 2>/dev/null
 
 echo ""
 echo "=== Dockerfile: has the built image actually been rebuilt since the last repo change? ==="
-# Can't diff a repo file against a running image directly — this is a
-# reminder, not an automated check. The Dockerfile has been through
-# several real, hard-won fixes; a stale image after a Dockerfile edit
-# reproduces the exact "fix committed but never actually deployed"
-# problem this whole script exists to catch, just one layer removed
-# (image vs. container, not repo vs. deployed-file).
+# CONFIRMED worth automating: this used to just print both raw
+# timestamps (an epoch number and an ISO-8601 string) for manual
+# comparison — genuinely error-prone in practice, confirmed directly
+# when this exact comparison needed to be worked out by hand with a
+# separate Python one-liner rather than trusted by eye. Now computes
+# and states the answer directly.
 if [[ -f "$REPO/docker/hermes-sandbox.Dockerfile" ]]; then
   DOCKERFILE_MTIME=$(stat -f "%m" "$REPO/docker/hermes-sandbox.Dockerfile" 2>/dev/null || stat -c "%Y" "$REPO/docker/hermes-sandbox.Dockerfile" 2>/dev/null)
   IMAGE_CREATED=$(docker inspect -f '{{.Created}}' hermes-sandbox:latest 2>/dev/null)
   if [[ -z "$IMAGE_CREATED" ]]; then
     echo "NOT YET BUILT:          hermes-sandbox:latest (no such image found)"
   else
-    echo "Dockerfile last modified (epoch): $DOCKERFILE_MTIME"
-    echo "Image hermes-sandbox:latest created: $IMAGE_CREATED"
-    echo "  -> compare these by eye; if the Dockerfile is newer than the"
-    echo "     image build, rebuild and retag before trusting the sandbox."
+    IMAGE_CREATED_EPOCH=$(python3 -c "
+import datetime
+try:
+    dt = datetime.datetime.fromisoformat('$IMAGE_CREATED'.replace('Z', '+00:00'))
+    print(int(dt.timestamp()))
+except Exception:
+    pass
+" 2>/dev/null)
+    if [[ -z "$IMAGE_CREATED_EPOCH" ]]; then
+      echo "COULD NOT PARSE image creation timestamp — falling back to raw values:"
+      echo "  Dockerfile modified (epoch): $DOCKERFILE_MTIME"
+      echo "  Image created: $IMAGE_CREATED"
+    elif [[ "$DOCKERFILE_MTIME" -gt "$IMAGE_CREATED_EPOCH" ]]; then
+      echo "STALE — Dockerfile is newer than the built image."
+      echo "  Dockerfile modified: $(TZ=UTC date -r "$DOCKERFILE_MTIME" "+%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || TZ=UTC date -d "@$DOCKERFILE_MTIME" "+%Y-%m-%d %H:%M:%S UTC" 2>/dev/null)"
+      IMAGE_CREATED_DISPLAY=$(python3 -c "
+import datetime
+dt = datetime.datetime.fromisoformat('$IMAGE_CREATED'.replace('Z', '+00:00'))
+print(dt.strftime('%Y-%m-%d %H:%M:%S UTC'))
+" 2>/dev/null)
+      echo "  Image built:         ${IMAGE_CREATED_DISPLAY:-$IMAGE_CREATED}"
+      echo "  -> rebuild and retag before trusting the sandbox."
+    else
+      echo "OK — image is at least as new as the current Dockerfile."
+    fi
   fi
 else
   echo "MISSING FROM REPO:      docker/hermes-sandbox.Dockerfile"

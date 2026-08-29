@@ -25,6 +25,18 @@ itself isn't.
 
 Usage:
     python3 submit_flag.py submit <problem_id> <candidate_flag>
+    python3 submit_flag.py submit <problem_id> --candidate-file <path>
+
+CONFIRMED real failure that motivated --candidate-file: a genuinely
+correct flag (FLAG_This_is_right_:)) was submitted as a raw shell
+argument via the agent's own terminal tool, and the unescaped ')' broke
+bash's `eval` parsing before this script ever ran at all — a real
+answer lost purely to shell syntax, unrelated to whether the derivation
+was right. --candidate-file sidesteps this entirely: write the exact
+candidate to a file via the write_file tool (which never touches a
+shell), then pass the file's path — a plain filename is virtually
+always shell-safe regardless of what characters the candidate itself
+contains.
 
 Hard limits, enforced in code, not just documented in this docstring:
 - The candidate must match the confirmed real flag shape before any
@@ -60,6 +72,7 @@ import os
 import re
 import json
 import time
+import argparse
 import requests
 
 SUBMIT_URL = "https://ksnctf.sweetduet.info/api/submit"
@@ -324,10 +337,71 @@ def cmd_submit(problem_id: str, candidate: str):
 
 
 def main():
-    if len(sys.argv) != 4 or sys.argv[1] != "submit":
-        print(__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_submit = sub.add_parser("submit")
+    p_submit.add_argument(
+        "problem_id",
+        help="The numeric ksnctf problem ID (from its /problem/<N> URL).",
+    )
+    p_submit.add_argument(
+        "candidate", nargs="?", default=None,
+        help="The candidate flag directly, as a plain argument. Omit "
+             "this and use --candidate-file instead if the candidate "
+             "might contain shell-special characters (parentheses, "
+             "quotes, colons followed by parens, etc.) — confirmed real "
+             "failure: a genuinely correct flag containing ')' broke "
+             "bash's eval parsing before this script ever ran at all.",
+    )
+    p_submit.add_argument(
+        "--candidate-file", default=None,
+        help="Path to a file — written via the write_file tool, never a "
+             "shell command — whose exact content (leading/trailing "
+             "whitespace stripped) is the candidate flag. Use this "
+             "instead of the positional candidate whenever there is any "
+             "chance the candidate contains characters a shell would "
+             "misinterpret. A plain file path is virtually always "
+             "shell-safe regardless of what the candidate itself "
+             "contains.",
+    )
+
+    args = parser.parse_args()
+
+    if args.command != "submit":
+        return
+
+    if args.candidate_file:
+        if args.candidate is not None:
+            print(json.dumps({
+                "submitted": False,
+                "reason": "Provide either a positional candidate or "
+                          "--candidate-file, not both.",
+            }, indent=2))
+            sys.exit(1)
+        try:
+            with open(args.candidate_file) as f:
+                candidate = f.read().strip()
+        except OSError as e:
+            print(json.dumps({
+                "submitted": False,
+                "reason": f"Could not read --candidate-file "
+                          f"{args.candidate_file!r}: {e}",
+            }, indent=2))
+            sys.exit(1)
+    elif args.candidate is not None:
+        candidate = args.candidate
+    else:
+        print(json.dumps({
+            "submitted": False,
+            "reason": "Provide either a positional candidate or "
+                      "--candidate-file.",
+        }, indent=2))
         sys.exit(1)
-    cmd_submit(sys.argv[2], sys.argv[3])
+
+    cmd_submit(args.problem_id, candidate)
 
 
 if __name__ == "__main__":
