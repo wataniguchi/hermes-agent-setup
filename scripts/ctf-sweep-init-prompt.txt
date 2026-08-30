@@ -1,0 +1,69 @@
+Start a fresh, fully autonomous ksnctf sweep using the ctf-solver
+skill. Workspace and history have been cleared — this is a genuinely
+clean start, zero problems solved yet.
+
+STEP 1 — initialize:
+
+    python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py init --discover /root/.hermes/skills/security/ksnctf-discover/scripts/ksnctf_discover.py --solver /root/.hermes/skills/security/ctf-solver/scripts/ctf_solver.py --submit /root/.hermes/skills/security/ksnctf-submit/scripts/submit_flag.py --scope ctfq.u1tramarine.blue
+
+Expect 41 problems discovered, scope unreachable (this is normal —
+those specific problems will be auto-skipped).
+
+STEP 2 — the loop. Do this repeatedly:
+
+1. python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py next
+2. Derive the actual flag using real tools — binary-static-analysis for
+   files, john/hashcat for password/hash cracking (a real wordlist
+   exists at /usr/share/wordlists/rockyou.txt; never hand-roll a
+   brute-force loop in Python), node for JavaScript (this sandbox has a
+   real Node.js runtime — never simulate JS logic in Python), web
+   search when genuinely stuck (search for the general technique
+   required, not just this problem's name).
+3. Follow every standing rule in AGENTS.md: never report an unverified
+   flag, never describe something you haven't inspected, verify by
+   actually running your derivation, check whether you've already
+   reached a readable answer before assuming more transformation is
+   needed, attempt a live connection before guessing if one is
+   referenced, and abstract a stuck problem's real technical
+   requirement before concluding it's unsolvable.
+4. Before submitting, check what's already been tried:
+   python3 -c "
+   import json
+   with open('/workspace/.ksnctf_submission_log.json') as f:
+       log = json.load(f)
+   for a in log.get('<id>', []):
+       print(a['candidate'], '->', a['result'])
+   "
+5. Submit: python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py submit <id> <flag>
+6. Go back to step 1.
+
+DO NOT STOP. This is not a suggestion — treat stopping to summarize
+progress as a failure mode exactly as serious as guessing a wrong flag.
+Keep calling `next` and working the loop continuously, problem after
+problem, without pausing to report, summarize, or check in. There are
+only three legitimate reasons to stop:
+
+1. The traversal reports "done": true — every problem solved, skipped,
+   or exhausted. Stop and give the final summary.
+2. You are certain you are running low on context or response budget
+   right now, in this exact moment — not "I've done a few problems so
+   here's an update."
+3. Something is genuinely broken in a way no tool or technique can work
+   around (report exactly what and why).
+
+Nothing else justifies pausing. If you find yourself about to write a
+sentence like "here's my progress so far" or "I am continuing the
+loop," that is the signal to NOT send that message and instead call
+`next` again immediately.
+
+Each submission is a real, limited attempt (5 max per problem) — the
+tool refuses duplicate candidates and doubled FLAG_ prefixes
+automatically, and warns you explicitly on your 3rd, 4th, and 5th wrong
+attempt. Take those warnings seriously.
+
+Context resets are safe if truly needed — /new, then
+`ctf_traversal.py status` to resume exactly where you left off. No
+progress is lost.
+
+Only when genuinely done (or blocked, or out of budget): report full
+progress and give a complete summary.

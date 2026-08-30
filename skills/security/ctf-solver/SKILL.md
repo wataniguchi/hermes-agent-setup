@@ -104,6 +104,26 @@ candidate flag, `status` as a fallback check-in), so there is no
 legitimate reason to narrate instead of calling one of them while work
 remains.
 
+**Note on hard API-level aborts.** The tool-call discipline above
+covers turns where the model itself chooses (or fails to choose) a
+next action — it cannot cover a hard crash between a tool's execution
+and the next API call, since no turn ever happens for the model to
+apply the rule to. This has occurred for real: `vision_analyze`
+completed successfully, but the image it returned failed to decode on
+the provider's *next* call, which some Hermes versions treat as a
+non-retryable error and abort the session on — with no narration, no
+missed tool call, nothing the model could have done differently in
+that turn. Two things reduce this, neither of which is this skill's
+job to enforce directly: (1) the file-validation standing rule in
+AGENTS.md, which catches a bad image before `vision_analyze` is ever
+called on it; (2) the underlying Hermes harness recognizing this error
+class and recovering (stripping the bad content and retrying) instead
+of aborting — track whether your Hermes version does this before
+assuming a sweep will survive a corrupted-image problem unattended.
+If a sweep is found to have aborted this way regardless, resuming with
+`ctf_traversal.py status` picks up exactly where it left off — no
+traversal state is lost, only the in-flight turn.
+
 **No artificial restriction on autonomous submission.** The guardrail
 (attempt cap, mandatory delay) lives entirely inside the submit script
 itself and applies identically regardless of what calls it — a human, a

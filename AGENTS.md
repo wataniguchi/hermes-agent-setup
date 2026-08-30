@@ -165,6 +165,28 @@ that would apply to *any* problem needing the same underlying technique,
 not just this one, and search for that — this comes before concluding
 anything is genuinely beyond reach, not after.
 
+**Validate a file's integrity locally before handing it to a tool that
+submits it directly to the model API.** Tools like `vision_analyze`
+pass binary content straight into the next model request rather than
+returning inspectable text — if that content is malformed, the failure
+can surface as a hard API-level error on the *next* turn rather than a
+normal, recoverable tool error. This has happened for real: a
+challenge's decryption step produced a JPEG that passed a superficial
+check (correct header, valid EXIF) but was corrupted in its compressed
+body — `vision_analyze` itself succeeded, and the failure only
+surfaced one turn later, aborting the session outright. Before calling
+`vision_analyze` on any file you produced yourself (via decryption,
+extraction, decoding, etc. — not files handed to you unmodified by the
+platform), verify it decodes cleanly with a local, non-model check
+first, e.g.:
+    identify -verbose <path>        # reports "Corrupt JPEG data" etc.
+or:
+    python3 -c "from PIL import Image; Image.open('<path>').load()"
+If validation fails, the artifact itself is wrong — treat this the
+same as any other verification failure per the rules above: your
+derivation has a bug, go find it, don't call `vision_analyze` on
+suspect output and don't route around the check.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)
