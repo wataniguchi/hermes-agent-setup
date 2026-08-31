@@ -24,14 +24,6 @@ THE LOOP — do this repeatedly:
    anything else — a previous session may have left a partial
    derivation, ruled-out approaches, or a concrete next step to try.
    Don't re-derive from scratch what's already been worked out.
-   If no such file exists but the problem is already in_progress, a
-   prior session may still have touched it without leaving notes —
-   check /workspace/session-exports/index.txt for archived past
-   attempts, then grep them directly for this problem's ID or title,
-   e.g.:
-       grep -l "problem/<id>\|<problem title>" /workspace/session-exports/*.md
-   A match is not proof real work happened there — read it before
-   trusting it.
 2. Derive the actual flag using real tools — binary-static-analysis for
    files, john/hashcat for password/hash cracking (a real wordlist
    exists at /usr/share/wordlists/rockyou.txt; never hand-roll a
