@@ -320,6 +320,81 @@ worth keeping in mind as a real, known requirement for whatever a future
 something to design speculatively now without a real platform to build
 against.
 
+### `next` was silently abandoning `in_progress` problems forever — found via a deliberate two-session test
+
+Confirmed directly, not theorized: `cmd_next()`'s original filter was
+`if info["status"] != "pending": continue`. The instant a problem was
+first handed out it flipped to `in_progress` — a status that is
+neither `pending` nor terminal — and from that point on, every future
+`next` call's own filter skipped it permanently, for any reason,
+whether or not it was ever actually solved. `"done": true` fires once
+nothing remains `pending`, regardless of how many problems sit
+abandoned mid-derivation at `in_progress`.
+
+This was caught by a deliberate test: run one session to work a
+problem partway (without solving it), then run a second session
+immediately after and check whether it ever revisited the first's
+work. It didn't — `next` handed the second session an entirely
+different, fresh `pending` problem instead, and traced to source
+confirmed why: the first problem was structurally ineligible to ever
+be returned again. This matters far beyond that one test — every
+recovery mechanism this design documents for unfinished work (progress
+notes, the session-export archive, both described above) was being
+written for problems `next` would never route back to, silently
+undermining the whole point of building them.
+
+Fixed by broadening the filter to `if info["status"] not in
+("pending", "in_progress"): continue`, walking the same natural
+discovery order for both statuses — an `in_progress` problem is now
+picked up again before any later `pending` one, rather than being
+skipped forever the moment something else gets attempted.
+Deliberately not building anything more elaborate (no priority
+scoring, no "N consecutive re-returns forces a skip" heuristic): if an
+agent keeps getting the same problem back without ever calling
+`submit`, that's a stuck-agent problem to diagnose on its own terms,
+not something the traversal engine should paper over speculatively.
+
+### `load_state`/`save_state` had zero concurrency protection — a second, older bug surfaced while checking the first fix
+
+Found while investigating an unrelated-looking symptom: two problems
+that had correctly reached `in_progress` (with real, logged submission
+attempts against them) were later found reverted back to `pending`,
+with their attempt counts untouched. Traced to source rather than
+guessed at: `load_state()` does a plain full-file read, `save_state()`
+does a plain full-file overwrite, and neither has ever had any locking
+at all. Grepping every place the literal string `"pending"` gets
+written confirmed it happens exactly once — the initial default set
+during `init` — so no combination of `next`/`submit` calls can produce
+this pattern through their own documented logic alone.
+
+The actual mechanism: any process that calls `load_state()`, does
+real work for a while — sessions running over an hour on a single
+turn aren't unusual for a hard problem — and only then calls
+`save_state()`, silently overwrites *everything* with its own
+now-stale in-memory snapshot, discarding whatever any other process
+legitimately changed in between that process's own load and save.
+This is a pre-existing bug independent of the `in_progress` fix above
+and of anything built earlier tonight — it has been present since
+`ctf_traversal.py` was first written, just hadn't previously surfaced
+as a *visible* problem, since a lot of the state this could clobber
+(status transitions) is either idempotent or, before tonight's fix,
+happened to only move in directions that made the corruption easy to
+overlook.
+
+Fixed with `state_lock()`, an `fcntl.flock`-based exclusive lock (a
+separate lock file, not the state file itself) wrapped around each
+write-capable subcommand's *entire* load-modify-save span — not just
+around the individual file operations inside `load_state`/`save_state`,
+since the race is about time elapsing between load and save, not
+about either read or write being individually unsafe. `flock()` blocks
+rather than failing, so a second process queues behind the first
+rather than erroring out. `status` (read-only) is deliberately left
+unlocked — a momentarily stale read is not a data-loss risk the way an
+overwrite is. Verified directly with a small concurrent-access test
+(two threads, each opening its own file descriptor on the lock file,
+one holding the lock three times longer than the other) confirming
+strict serialization with zero interleaving, before trusting it.
+
 ### Reachability — fast, cached, and never confused with a wrong flag
 
 **Confirmed real infrastructure finding**: `ctfq.u1tramarine.blue` — the
@@ -515,6 +590,25 @@ hard-stops entirely. This is worth building as its own small, separate
 script (not folded into `ksnctf-fetch`), since submission has a
 meaningfully different risk profile than acquisition and deserves its
 own tightly-scoped, carefully-reviewed code path.
+
+**`ctf_traversal.py` was slower than `ksnctf-submit` itself to notice
+exhaustion — found from a real, wasted-effort scenario, not
+speculation.** `submit_flag.py` already signals the exact moment the
+last real attempt is used, wrong result or not — its own response
+includes `attempts_remaining`, reaching `0` on that final genuine
+submission, plus an explicit `"PERMANENTLY EXHAUSTED"` warning in the
+same response. `cmd_submit` in `ctf_traversal.py` was only checking
+for `result is True` or a `REFUSED...hard cap` reason, ignoring that
+signal entirely — so a problem's real 5th (and final) wrong attempt
+left it at `in_progress`, discoverable as `exhausted` only via a wasted
+*sixth* attempt, which the guardrail refuses before it ever reaches
+ksnctf's server. Any derivation effort spent finding that sixth
+candidate — searching, re-deriving, second-guessing an approach — was
+spent on something that could never have been checked at all. Fixed by
+adding one more branch to `cmd_submit`: a genuine (non-refused) result
+with `attempts_remaining == 0` now marks the problem `exhausted`
+immediately, on the same call that actually used the last attempt,
+without waiting for a doomed sixth call to reveal it after the fact.
 
 ### 3. Shared verification/anti-fabrication baseline
 
@@ -820,6 +914,108 @@ by checking whether `workspace/.ctf_traversal_state.json` already
 exists (present → resume, absent → init), with `--init`/`--resume` to
 force either explicitly. Every attempt after the first always resumes,
 since a traversal exists by then regardless of which prompt started it.
+
+### Two things a headless `-z` session cannot rely on, discovered from real curator friction
+
+Adopting skills into curator management (`hermes curator adopt`) was
+meant to fix background-review write failures observed throughout this
+sweep (`Refusing background curator patch ... created_by=None`).
+Adoption itself worked as documented — but tracing why a real
+post-adoption write still never appeared led to a deeper finding,
+confirmed directly in Hermes's own source: the background review
+thread that would perform such a write is spawned with `daemon=True`
+(`agent/oneshot.py` calls the same `_spawn_background_review` path as
+interactive `chat`), and `hermes_cli/oneshot.py`'s `run_oneshot` — the
+actual implementation behind `-z` — returns immediately after printing
+the final response, with no `join()` on any background thread
+beforehand; its own docstring states "the caller owns process
+termination." A daemon thread is killed unconditionally the instant
+Python's main thread exits. Under `chat`, the process stays alive
+indefinitely, so the thread has all the time it needs; under `-z`, it
+almost certainly never survives long enough to make even one LLM call.
+
+This has two separate real consequences, not one, and each needed its
+own fix rather than a single umbrella one:
+
+1. **Skill self-improvement.** The curator-adoption fix helps `chat`
+   sessions and manual `hermes curator run` invocations — both
+   long-lived or synchronous, unaffected by the daemon-thread issue —
+   but does nothing for the unattended sweep specifically, since the
+   mechanism it unblocked never gets to execute there regardless of
+   permissions. Mitigated in `ctf-solver/SKILL.md` and both prompt
+   files: when something worth capturing about a skill comes up,
+   append it to `/workspace/skill-improvement-notes.md` as an ordinary
+   tool call — a real write inside the awaited, main part of the turn,
+   not a detached thread — for a human to review and apply later,
+   rather than attempting to patch the skill directly.
+2. **Problem-level derivation progress.** More serious, since it's
+   closer to the traversal's actual purpose: `ctf_traversal.py`'s
+   `in_progress` state records only that a problem isn't solved, not
+   what was actually tried, ruled out, or partially derived. Combined
+   with the daemon-thread finding, an involuntary turn end (a
+   text-only response, a budget cutoff, a crash — exactly the failure
+   mode the watchdog exists to relaunch through) previously meant the
+   next session re-derived an in-progress problem completely from
+   scratch. Mitigated the same way at the model level:
+   `/workspace/progress-notes/problem_<id>.md`, one file per problem,
+   updated *as work happens* rather than only at a sensed stopping
+   point — since the whole point is surviving stops that give no
+   warning — and checked for and read first whenever `next` returns a
+   problem that already has one.
+
+   Progress notes depend on the model remembering to write them,
+   though, so `ctf-sweep-watchdog.sh` adds a second, deterministic
+   backstop underneath: after every attempt (regardless of exit code
+   or how the attempt ended), it exports that session's complete
+   transcript and copies it to `workspace/session-exports/
+   <session_id>.md`, appending the ID to a plain running
+   `workspace/session-exports/index.txt`. This happens at the
+   process-supervision layer, not inside the model's own turn, so it
+   can't be skipped by an involuntary stop the way a progress note
+   could be. The copy into `workspace/` (rather than leaving it at
+   Hermes's own `~/.hermes/profiles/.../session-exports/` path)
+   matters specifically because that path isn't bind-mounted into the
+   sandbox — the agent running *inside* the container couldn't read it
+   at all otherwise.
+
+   **A problem-id → session-id lookup index was proposed and
+   retracted before being built, on a direct and correct objection**:
+   a session can touch several problems without ever calling `submit`
+   on all of them, and even a `next` call returning a given problem
+   says nothing about how much real work happened on it before the
+   agent moved on. Any index built by pattern-matching `submit`/`next`
+   calls would be silently wrong exactly where it matters most —
+   substantial, unsubmitted, later-abandoned work — and would look
+   authoritative while being incomplete.
+
+   **The next attempt — a prompt instruction to grep the archive for a
+   problem's ID/title — was also dropped, on a second, separate
+   objection.** The grep pattern itself (`problem/<id>`, matching
+   ksnctf's own URL shape) baked in a platform-specific assumption,
+   directly contradicting the platform-blind principle this project
+   already enforced elsewhere (see the `ctf-solver/SKILL.md` cleanup
+   above, removing hardcoded ksnctf examples from the general
+   orchestrator). A general CTF skill can't wire up a query pattern
+   for a platform it doesn't know about yet. The archive itself stays
+   — `workspace/session-exports/<session_id>.md` plus `index.txt`,
+   written by the watchdog with zero reference to problems, URLs, or
+   titles at all — as a general, platform-agnostic safety net and
+   audit trail. What's gone is only the instruction telling the model
+   to search it with a platform-specific pattern; recovering
+   unsubmitted work from the raw archive, if ever needed, is a manual
+   or future task, not something baked into the standing prompt today.
+
+Both mitigations share the same shape as the write-up mechanism
+above: an ordinary tool call during the live, fully-awaited part of
+the turn, deliberately not relying on anything that happens after the
+model's final response. A more direct fix exists in principle — patch
+`oneshot.py` to `join()` the background review thread with a bounded
+timeout before returning — but this edits Hermes's own installed
+source directly, which doesn't survive a `hermes update`, and needs
+more source-reading to locate the actual `Thread` object (versus the
+tracking dataclass surfaced so far) before it could be done safely.
+Deliberately not attempted yet; the write-as-you-go mitigations get
+the real value without that fragility.
 
 ## Migration plan — phased, not all at once
 

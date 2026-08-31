@@ -70,6 +70,23 @@ OUTPUT_LOG="$WORKSPACE_DIR/.ctf-sweep-watchdog-output.log"
 USAGE_FILE="$WORKSPACE_DIR/.ctf-sweep-last-usage.json"
 SESSION_ID_FILE="$WORKSPACE_DIR/.ctf-sweep-current-session-id"
 
+# Archived full transcripts of every attempt, one .md per session, plus a
+# plain running index of their IDs in order. Lives under workspace/ (not
+# ~/.hermes/profiles/.../session-exports, which isn't bind-mounted into
+# the sandbox) specifically so the agent running *inside* the container
+# can read its own history back — see CTF_GENERALIZATION_DESIGN.md,
+# "Operational resilience" for why this exists: a oneshot session's own
+# reasoning is gone the moment its turn ends, and ctf_traversal.py's
+# `in_progress` state records only that a problem isn't solved, not what
+# was actually tried. Deliberately no attempt at a problem-id -> session
+# lookup table here — a session can touch several problems without ever
+# calling `submit` on all of them, so any such index would be silently
+# wrong exactly where it matters most (unsubmitted, abandoned work). The
+# prompt's own fallback is a full-text grep across every archived file
+# instead — slower, but honest, since it can't miss what an index would.
+SESSION_EXPORTS_DIR="$WORKSPACE_DIR/session-exports"
+SESSION_EXPORTS_INDEX="$SESSION_EXPORTS_DIR/index.txt"
+
 PROFILE="gemma-experiment"
 MODE=""   # "" = auto-detect on attempt #1; "init" or "resume" = forced every attempt
 START_MONITOR=1
@@ -157,6 +174,38 @@ else
     echo "Monitor: disabled (--no-monitor)"
 fi
 
+# Archive whatever session is currently known, unconditional on exit
+# code, whether discover_session_id succeeded, or how the attempt
+# ended — an involuntary stop (text-only response, budget cutoff,
+# crash, or a human's Ctrl-C) is exactly the case this exists for, so
+# it must not depend on the attempt having ended cleanly or normally.
+# Shared between the normal post-`wait` path below and `cleanup()`
+# (an interrupted attempt is archived too, not just a completed one).
+archive_session_transcript() {
+    local sid="${1:-}"
+    local label="${2:-current attempt}"
+    if [[ -z "$sid" ]]; then
+        echo "WARNING: no session id known for $label — cannot archive its transcript." | tee -a "$OUTPUT_LOG"
+        return
+    fi
+    mkdir -p "$SESSION_EXPORTS_DIR"
+    hermes -p "$PROFILE" sessions export \
+        --session-id "$sid" \
+        --format md \
+        --redact \
+        --force \
+        >> "$OUTPUT_LOG" 2>&1
+    local export_src
+    export_src="$(ls -t "$HOME/.hermes/profiles/$PROFILE/session-exports/$sid"-*.md 2>/dev/null | head -1)"
+    if [[ -n "$export_src" ]]; then
+        cp "$export_src" "$SESSION_EXPORTS_DIR/$sid.md"
+        echo "$sid" >> "$SESSION_EXPORTS_INDEX"
+        echo "Archived $label's transcript: $SESSION_EXPORTS_DIR/$sid.md" | tee -a "$OUTPUT_LOG"
+    else
+        echo "WARNING: could not export/archive $label's transcript (session $sid) — export produced no file." | tee -a "$OUTPUT_LOG"
+    fi
+}
+
 # Clean up on any exit path — Ctrl-C, an error exit further down, or
 # normal completion (this loop never completes normally today, but the
 # trap covers it regardless).
@@ -184,6 +233,11 @@ cleanup() {
         echo
         echo "Stopping in-progress hermes attempt (pid $hermes_pid)..."
         kill "$hermes_pid" 2>/dev/null
+        # Give the process a moment to actually die before exporting —
+        # exporting a still-writing session risks capturing a
+        # half-updated state; a dead one is a clean, final snapshot.
+        wait "$hermes_pid" 2>/dev/null
+        archive_session_transcript "${session_id:-}" "interrupted attempt #${attempt:-?}"
     fi
     if [[ -n "${MONITOR_PID:-}" ]]; then
         echo "Stopping monitor (pid $MONITOR_PID)..."
@@ -339,6 +393,10 @@ while true; do
         echo
         echo "--- Attempt #$attempt exited (code $exit_code): $(date) ---"
     } | tee -a "$OUTPUT_LOG"
+
+    # Archive this attempt's full transcript — see
+    # archive_session_transcript above for why this is unconditional.
+    archive_session_transcript "${session_id:-}" "attempt #$attempt"
 
     if [ -d "$LOG_DIR" ]; then
         echo "--- Last 5 agent.log lines: ---" | tee -a "$OUTPUT_LOG"

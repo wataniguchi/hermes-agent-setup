@@ -196,7 +196,7 @@ posted policy, never attack anything outside this host for live-target
 restriction, since analysis happens locally, not against the platform's
 own infrastructure.
 
-When using `challenge-fetch` or any downstream attack tool, pass this
+When using `ksnctf-fetch` or any downstream attack tool, pass this
 scope explicitly (e.g. `--scope ctfq.u1tramarine.blue`) — do not assume
 any tool already knows it, and do not try to derive it from a challenge
 page yourself. Update this section directly when moving to a different

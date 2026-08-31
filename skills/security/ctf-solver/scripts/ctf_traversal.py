@@ -54,8 +54,11 @@ import socket
 import time
 import subprocess
 import argparse
+import fcntl
+import contextlib
 
 STATE_PATH = "/workspace/.ctf_traversal_state.json"
+STATE_LOCK_PATH = STATE_PATH + ".lock"
 
 # Fast, lightweight reachability check — a raw TCP connect, not a full
 # HTTP request. This is the "fast and global" requirement: checked ONCE
@@ -74,6 +77,42 @@ def check_host_reachable(host: str) -> bool:
             return True
     except OSError:
         return False
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Exclusive lock spanning an entire load-modify-save cycle.
+
+    load_state()/save_state() do a plain full-file read and a plain full-file
+    overwrite, with no locking of their own — safe in isolation, but not
+    when two processes can each run load -> mutate -> save concurrently.
+    Whichever one calls save_state() last wins outright, silently discarding
+    everything the other changed in between its own load and save. This is
+    not hypothetical: confirmed directly against real state, twice — two
+    problems correctly marked in_progress by one session were found
+    reverted back to their original pending default after a separate,
+    long-running session (over an hour, not unusual for a hard problem)
+    finished and wrote back its own now-stale in-memory snapshot.
+
+    The fix is a lock around the *whole* read-modify-write span each
+    subcommand performs, not just around the individual open() calls
+    inside load_state()/save_state() — the race is about time elapsing
+    between load and save, not about either file operation itself being
+    unsafe. Every subcommand that both loads and saves state (init, next,
+    submit) wraps its full body in `with state_lock():`.
+
+    A separate lock file, not the state file itself, avoids fighting over
+    one file descriptor's read/write mode across calls that both read and
+    write the same path; flock() blocks (waits) rather than failing
+    immediately, so a second process just queues behind the first rather
+    than erroring out.
+    """
+    with open(STATE_LOCK_PATH, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def load_state() -> dict:
@@ -189,7 +228,8 @@ def cmd_init(discover_script: str, solver_script: str, submit_script: str, scope
         "scope_checked_at": time.time(),
         "problems": problems,
     }
-    save_state(state)
+    with state_lock():
+        save_state(state)
 
     print(json.dumps({
         "initialized": True,
@@ -211,83 +251,112 @@ def needs_scope_host(fetch_result: dict) -> bool:
 
 
 def cmd_next():
-    state = load_state()
+    with state_lock():
+        state = load_state()
 
-    for problem_id, info in state["problems"].items():
-        if info["status"] != "pending":
-            continue
+        # Deliberately includes "in_progress", not just "pending": once a
+        # problem is first handed out it flips to in_progress and, before
+        # this fix, would never be returned by `next` again regardless of
+        # whether it was ever solved — leaving it permanently abandoned the
+        # moment any later problem got attempted, and letting `done: true`
+        # fire while real, unfinished work sat untouched. Walking the same
+        # natural discovery order for both statuses means an in_progress
+        # problem is picked up again before any later pending one, giving
+        # progress-notes/session-export recovery (see AGENTS.md, ctf-solver
+        # SKILL.md) an actual chance to be used rather than being written
+        # for a problem `next` would never return to.
+        for problem_id, info in state["problems"].items():
+            if info["status"] not in ("pending", "in_progress"):
+                continue
 
-        fetch_result = run_script(
-            state["solver_script"],
-            ["solve", info["url"], "--scope", state["scope"]],
-        )
+            fetch_result = run_script(
+                state["solver_script"],
+                ["solve", info["url"], "--scope", state["scope"]],
+            )
 
-        if fetch_result.get("_error"):
-            info["status"] = "needs_manual_review"
+            if fetch_result.get("_error"):
+                info["status"] = "needs_manual_review"
+                save_state(state)
+                continue
+
+            if needs_scope_host(fetch_result) and not state["scope_reachable"]:
+                # Instant, no network call — consults the cached reachability
+                # result from init rather than re-discovering the same
+                # unreachability slowly for this problem too.
+                info["status"] = "skipped_unreachable"
+                save_state(state)
+                continue
+
+            info["status"] = "in_progress"
             save_state(state)
-            continue
+            print(json.dumps({
+                "problem_id": problem_id,
+                "title": info["title"],
+                "url": info["url"],
+                "fetch_result": fetch_result,
+                "reminder": (
+                    "This script does not derive flags — that's your job. "
+                    "Once you have a genuinely derived, self-verified "
+                    "candidate, submit it via: "
+                    "python3 ctf_traversal.py submit " + problem_id + " <candidate_flag>"
+                    " (or, if the candidate might contain shell-special "
+                    "characters like parentheses or quotes, write it to a "
+                    "file via write_file and use --candidate-file <path> "
+                    "instead — a raw shell argument with unescaped special "
+                    "characters has broken a genuinely correct submission "
+                    "before)."
+                ),
+            }, indent=2))
+            return
 
-        if needs_scope_host(fetch_result) and not state["scope_reachable"]:
-            # Instant, no network call — consults the cached reachability
-            # result from init rather than re-discovering the same
-            # unreachability slowly for this problem too.
-            info["status"] = "skipped_unreachable"
-            save_state(state)
-            continue
-
-        info["status"] = "in_progress"
-        save_state(state)
         print(json.dumps({
-            "problem_id": problem_id,
-            "title": info["title"],
-            "url": info["url"],
-            "fetch_result": fetch_result,
-            "reminder": (
-                "This script does not derive flags — that's your job. "
-                "Once you have a genuinely derived, self-verified "
-                "candidate, submit it via: "
-                "python3 ctf_traversal.py submit " + problem_id + " <candidate_flag>"
-                " (or, if the candidate might contain shell-special "
-                "characters like parentheses or quotes, write it to a "
-                "file via write_file and use --candidate-file <path> "
-                "instead — a raw shell argument with unescaped special "
-                "characters has broken a genuinely correct submission "
-                "before)."
-            ),
+            "done": True,
+            "summary": summarize(state),
         }, indent=2))
-        return
-
-    print(json.dumps({
-        "done": True,
-        "summary": summarize(state),
-    }, indent=2))
 
 
 def cmd_submit(problem_id: str, candidate: str):
-    state = load_state()
+    with state_lock():
+        state = load_state()
 
-    if problem_id not in state["problems"]:
-        print(json.dumps({
-            "submitted": False,
-            "reason": f"problem_id {problem_id!r} is not in the current "
-                      "traversal's problem set — check for a typo.",
-        }, indent=2))
-        sys.exit(1)
+        if problem_id not in state["problems"]:
+            print(json.dumps({
+                "submitted": False,
+                "reason": f"problem_id {problem_id!r} is not in the current "
+                          "traversal's problem set — check for a typo.",
+            }, indent=2))
+            sys.exit(1)
 
-    result = run_script(state["submit_script"], ["submit", problem_id, candidate])
+        result = run_script(state["submit_script"], ["submit", problem_id, candidate])
 
-    if result.get("result") is True:
-        state["problems"][problem_id]["status"] = "solved"
-        save_state(state)
-    elif result.get("reason", "").startswith("REFUSED") and "hard cap" in result.get("reason", ""):
-        state["problems"][problem_id]["status"] = "exhausted"
-        save_state(state)
-    # A plain wrong-flag result (result: false) or a network-error
-    # result leaves status as "in_progress" — both are cases where
-    # retrying (subject to ksnctf-submit's own guardrail) still makes
-    # sense, unlike a genuine cap-exhaustion or a real solve.
+        if result.get("result") is True:
+            state["problems"][problem_id]["status"] = "solved"
+            save_state(state)
+        elif result.get("reason", "").startswith("REFUSED") and "hard cap" in result.get("reason", ""):
+            state["problems"][problem_id]["status"] = "exhausted"
+            save_state(state)
+        elif result.get("attempts_remaining") == 0:
+            # CONFIRMED real gap, found from actual use: a genuine (not
+            # refused) submission that used the last of the 5 real
+            # attempts and still came back wrong left status as
+            # "in_progress" here, even though submit_flag.py's own
+            # result already signals total exhaustion via
+            # attempts_remaining == 0 (and its own "PERMANENTLY
+            # EXHAUSTED" strategy_warning text) — that signal was
+            # simply never acted on. The only way to discover
+            # exhaustion was a wasted sixth submit call, which the
+            # guardrail refuses before it ever reaches the network —
+            # meaning any derivation effort spent finding that sixth
+            # candidate was spent on something that could never have
+            # been checked at all. Acting on the signal immediately
+            # avoids that wasted work.
+            state["problems"][problem_id]["status"] = "exhausted"
+            save_state(state)
+        # A plain wrong-flag result with attempts remaining, or a
+        # network-error result, leaves status as "in_progress" — both
+        # remain legitimately retryable.
 
-    print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2))
 
 
 def summarize(state: dict) -> dict:

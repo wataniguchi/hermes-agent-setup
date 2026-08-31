@@ -19,6 +19,19 @@ vision_analyze on it again.
 THE LOOP — do this repeatedly:
 
 1. python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py next
+   If the returned problem already has a file at
+   /workspace/progress-notes/problem_<id>.md, read it before doing
+   anything else — a previous session may have left a partial
+   derivation, ruled-out approaches, or a concrete next step to try.
+   Don't re-derive from scratch what's already been worked out.
+   If no such file exists but the problem is already in_progress, a
+   prior session may still have touched it without leaving notes —
+   check /workspace/session-exports/index.txt for archived past
+   attempts, then grep them directly for this problem's ID or title,
+   e.g.:
+       grep -l "problem/<id>\|<problem title>" /workspace/session-exports/*.md
+   A match is not proof real work happened there — read it before
+   trusting it.
 2. Derive the actual flag using real tools — binary-static-analysis for
    files, john/hashcat for password/hash cracking (a real wordlist
    exists at /usr/share/wordlists/rockyou.txt; never hand-roll a
@@ -26,7 +39,16 @@ THE LOOP — do this repeatedly:
    real Node.js runtime — never simulate JS logic in Python), web
    search when genuinely stuck (search for the general technique
    required, not just this problem's name).
-3. Follow every standing rule in AGENTS.md: never report an unverified
+3. Keep /workspace/progress-notes/problem_<id>.md updated as you go —
+   what's been discovered or ruled out, the exact state of any partial
+   derivation, relevant file paths, and the concrete next step to try.
+   Do this as real progress happens, not only when you sense you're
+   about to stop: a oneshot session's own reasoning is gone the moment
+   this turn ends, including an *involuntary* end (a text-only response
+   with no tool call, a budget cutoff, a crash) that gives no warning
+   beforehand. Treat this the same as saving your work regularly, not
+   as a special end-of-turn action.
+4. Follow every standing rule in AGENTS.md: never report an unverified
    flag, never describe something you haven't inspected, verify by
    actually running your derivation, check whether you've already
    reached a readable answer before assuming more transformation is
@@ -34,7 +56,7 @@ THE LOOP — do this repeatedly:
    referenced, validate any file you produced yourself before handing
    it to a model-facing tool, and abstract a stuck problem's real
    technical requirement before concluding it's unsolvable.
-4. Before submitting, check what's already been tried:
+5. Before submitting, check what's already been tried:
    python3 -c "
    import json
    with open('/workspace/.ksnctf_submission_log.json') as f:
@@ -42,8 +64,26 @@ THE LOOP — do this repeatedly:
    for a in log.get('<id>', []):
        print(a['candidate'], '->', a['result'])
    "
-5. Submit: python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py submit <id> <flag>
-6. Go back to step 1.
+6. Submit: python3 /root/.hermes/skills/security/ctf-solver/scripts/ctf_traversal.py submit <id> <flag>
+7. If the submit result is true (solved): write a solve write-up in
+   one tool call to /workspace/writeups/problem_<id>.md — the problem
+   title, the core technique/category, the actual derivation steps
+   that worked, the key tools/commands used, and anything a wrong
+   attempt revealed about the right approach. This is a tool call like
+   every other step in this loop, not a narrated summary — write the
+   file and continue immediately into the next step, do not describe
+   its contents in chat.
+8. Go back to step 1.
+
+If you notice something a skill (this one or any other) should say
+differently — a gap, a wrong assumption, a missed edge case — append a
+note to /workspace/skill-improvement-notes.md in one tool call: which
+skill, what you noticed, and the suggested change. Do not attempt to
+patch the skill file directly — background curator writes don't
+reliably land under this headless mode. This is opportunistic, not a
+required step: don't pause the loop looking for something to note,
+just capture it in the same turn if it comes up and continue
+immediately.
 
 DO NOT STOP. This is not a suggestion — treat stopping to summarize
 progress as a failure mode exactly as serious as guessing a wrong flag.
@@ -70,8 +110,12 @@ automatically, and warns you explicitly on your 3rd, 4th, and 5th wrong
 attempt. Take those warnings seriously.
 
 Context resets are safe if truly needed — /new, then
-`ctf_traversal.py status` to resume exactly where you left off. No
-progress is lost.
+`ctf_traversal.py status` to resume exactly where you left off.
+Traversal state (solved/pending/in_progress) is never lost either way —
+but problem-level derivation progress only survives a reset or an
+unexpected turn end if you've actually been keeping
+/workspace/progress-notes/problem_<id>.md up to date per step 3 above.
+Make that a running habit, not an afterthought.
 
 Only when genuinely done (or blocked, or out of budget): report full
 progress and give a complete summary.

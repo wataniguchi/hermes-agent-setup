@@ -11,7 +11,7 @@ metadata:
 ## What this actually automates, and what it honestly doesn't
 
 This is the entry point for "solve this challenge," but it isn't a
-claim that every kind of ksnctf challenge is fully automated end-to-end
+claim that every kind of CTF challenge is fully automated end-to-end
 — it isn't. Be clear with yourself about which case you're in:
 
 - **Downloadable binary (PE/ELF/Mach-O, native or .NET)**: genuinely
@@ -71,17 +71,85 @@ once, caching both. State persists in
 `submit` can be called repeatedly over however many separate agent turns
 a full traversal actually takes.
 
-`next` returns the next `pending` problem, having already fetched and
-classified it via `--solver` (`ctf_solver.py`). If that classification
-needs the scope host and the cached check found it unreachable, the
-problem is marked `skipped_unreachable` immediately — no network call,
-no waiting, no rediscovering the same fact slowly for every affected
-problem.
+`next` returns the next problem that's either `pending` or already
+`in_progress`, walking the discovery's natural order for both —
+having already fetched and classified it via `--solver`
+(`ctf_solver.py`). If that classification needs the scope host and the
+cached check found it unreachable, the problem is marked
+`skipped_unreachable` immediately — no network call, no waiting, no
+rediscovering the same fact slowly for every affected problem.
+
+**Revisiting `in_progress` problems, not just handing out fresh
+`pending` ones, is deliberate and was fixed from a real gap.** An
+earlier version only ever returned `pending` problems — the instant a
+problem was first handed out it flipped to `in_progress` and, since
+that status is neither `pending` nor terminal, it was never returned
+by `next` again, for any reason, regardless of whether it was ever
+actually solved. Confirmed directly: a traversal can reach `"done":
+true` with real problems sitting permanently `in_progress`, abandoned
+the moment a later problem got attempted — and everything this file
+documents for recovering unfinished work (progress notes, the
+session-export archive) was being written for problems `next` would
+structurally never route back to. Walking the same natural order for
+both statuses means an `in_progress` problem is picked up again before
+any later `pending` one, giving that recovery machinery an actual
+chance to be used.
 
 `submit` calls the platform's real submit script and updates state:
 `result: true` → marked `solved`; a hard-cap refusal → marked
 `exhausted`; anything else (wrong flag, network error) → left
 `in_progress`, since both remain legitimately retryable.
+
+**`in_progress` in `ctf_traversal.py`'s state means only that — it
+carries no memory of what was actually tried.** A oneshot invocation's
+own reasoning is gone the moment its turn ends, including an
+involuntary end (a text-only response with no tool call, a budget
+cutoff, a crash) that gives no advance warning at all — confirmed
+directly that the per-session background review this project relied on
+for incidental capture never gets the chance to run under headless
+mode (see `CTF_GENERALIZATION_DESIGN.md`'s "Operational resilience"
+section for why). Without something written to disk, the next session
+picking up an `in_progress` problem re-derives it completely from
+scratch, discarding however much real progress the previous one made.
+
+The fix: `/workspace/progress-notes/problem_<id>.md`, one file per
+problem, kept updated *as work happens* — what's been discovered or
+ruled out, the exact state of any partial derivation, relevant file
+paths, and the concrete next step to try. Written the same way as the
+write-up below (an ordinary tool call, not a narrated summary), but
+on a different cadence: little and often during genuine progress,
+not just once at a natural stopping point, since the whole reason it
+exists is to survive stops that arrive with no warning. When `next`
+returns a problem that already has one of these files, read it before
+doing anything else.
+
+**On a `result: true`, write a solve write-up before moving on.** One
+tool call to `/workspace/writeups/problem_<id>.md`, covering: the
+problem title, the core technique/category, the actual derivation
+steps that worked, the key tools/commands involved, and — if
+relevant — what any wrong attempts revealed about the right approach.
+One file per problem, not a shared running log, to avoid write
+ordering/contention across a long traversal and to keep each write-up
+independently referenceable later. This is a tool call like any other
+step in the loop, not a narrated summary — write the file and continue
+immediately into the next `next` call; do not describe its contents in
+chat, per the no-narration rule below.
+
+**Skill improvement notes — capture, don't patch.** Background curator
+writes require the target skill to be curator-managed (`hermes curator
+adopt <name>`) — but even once adopted, confirmed directly that the
+write itself happens on a background daemon thread that a headless
+`-z`/oneshot invocation never waits for before exiting: the process
+tears down before the thread gets a chance to run, so it never
+reliably lands regardless of ownership. If you notice something a
+skill's `SKILL.md` should say differently — a gap, a wrong assumption,
+a missed edge case — append a note to
+`/workspace/skill-improvement-notes.md` in one ordinary tool call
+instead of attempting to patch the skill directly: which skill, what
+was noticed, and the suggested change. This is opportunistic, not a
+required per-problem step — don't pause the loop looking for something
+to note; if it comes up naturally, capture it in the same turn and
+continue immediately, same discipline as the write-up step above.
 
 **Never produce a prose-only turn while a traversal is active — not even
 with the intention of following it with a tool call.** This has happened
@@ -143,36 +211,31 @@ running a full traversal).
 
 ## What's genuinely untested here
 
-This script has been written but not yet dry-run tested against a real
-challenge end-to-end. Validate against all three known ksnctf examples
-before trusting it:
-- `https://ksnctf.sweetduet.info/problem/11` (Riddle) — should report
-  `downloadable_file`, detect the PE correctly, and recommend
-  `ghidra-inventory`/`ghidra-decompile`.
-- `https://ksnctf.sweetduet.info/problem/35` (Simple Auth II) — should
-  report `embedded_web_app` with the correct in-scope target.
-- `https://ksnctf.sweetduet.info/problem/13` (Proverb) — should report
-  `direct_ssh_access` with correct connection details.
-
-If any of these don't match what `ksnctf-fetch` and
-`binary-static-analysis` already independently produce on their own
-(both already validated separately), the bug is almost certainly in this
-script's own orchestration logic, not in the underlying tools it calls.
+This script routes based on what the platform's own `--fetch` script
+reports — validating its routing logic means validating it against a
+few real, known examples from whatever platform is currently active.
+Today that's ksnctf: see `ksnctf-fetch/SKILL.md`'s own "What's
+genuinely untested here" for the specific known problems (one of each
+delivery mode) to check this against, and `ksnctf-discover/SKILL.md`
+for the discovery-side spot-checks. Not repeated here, to avoid the
+same facts drifting out of sync across files — when a future platform
+is added, its own `<platform>-fetch`/`<platform>-discover` skills are
+where its concrete validation examples belong, not this file.
 
 `ctf_traversal.py` is entirely new and entirely untested end-to-end.
 Validate in stages, not all at once:
-1. `init` — confirm it reports 41 (or however many currently exist)
-   total problems and a sensible `scope_reachable` value.
+1. `init` — confirm it reports the expected total problem count for
+   whatever platform's `--discover` script you're using, and a
+   sensible `scope_reachable` value.
 2. `next` — call it a few times in a row and confirm it walks through
    problems in the discovery's natural order, correctly marks
-   `embedded_web_app`/`direct_ssh_access`-only problems as
-   `skipped_unreachable` given the confirmed-unreachable scope host, and
-   returns a real, workable `downloadable_file` problem (e.g. Riddle)
-   with its fetch result attached.
-3. `submit` — against the same known test problem used to validate
-   `ksnctf-submit` directly (`problem_id=1`,
-   `FLAG_SRORGLnTh2Q5fTwu`), confirm it correctly marks the problem
-   `solved` in state afterward — check via `status`, not just the
-   immediate output.
+   scope-dependent problems as `skipped_unreachable` given the
+   confirmed-unreachable scope host, and returns a real, workable
+   downloadable-file problem with its fetch result attached.
+3. `submit` — against a known-answer test problem (see the active
+   platform's own `<platform>-submit` skill for one — e.g.
+   `ksnctf-submit/SKILL.md` documents ksnctf's), confirm it correctly
+   marks the problem `solved` in state afterward — check via `status`,
+   not just the immediate output.
 4. `status` — confirm the summary counts actually match what steps 2-3
    just did.
