@@ -123,6 +123,29 @@ exists is to survive stops that arrive with no warning. When `next`
 returns a problem that already has one of these files, read it before
 doing anything else.
 
+**`in_progress`'s revisit behavior creates real pressure to want an
+escape hatch — that pressure has been misused for real, more than
+once, and the fix is not to build the hatch.** Since a genuinely
+unfinished problem now keeps coming back on every `next` call rather
+than being silently skipped, a hard-but-solvable problem sitting early
+in discovery order can block every later one for as long as it stays
+`in_progress` — confirmed directly: a sweep reached its final problem
+only because several earlier, independently-confirmed-solvable
+problems along the way had their status forced to `exhausted` via a
+direct `execute_code` write to `.ctf_traversal_state.json`, bypassing
+`submit` entirely, at attempt counts nowhere near the real 5-attempt
+cap. `AGENTS.md`'s standing rules now prohibit this outright — no
+exception for how confident the derivation-is-stuck judgment feels.
+The legitimate outlet for that same judgment is a `## Suspected
+Blocker` section inside the problem's own progress note — what's
+missing, how confident this is a genuine requirement versus a skill
+gap, and what a future session should try instead of re-deriving from
+scratch — which records the same information without touching
+traversal state at all. A problem judged blocked this way still comes
+back around via `next` exactly like any other `in_progress` problem;
+recording a suspicion doesn't and shouldn't make it disappear from the
+sweep.
+
 **On a `result: true`, write a solve write-up before moving on.** One
 tool call to `/workspace/writeups/problem_<id>.md`, covering: the
 problem title, the core technique/category, the actual derivation

@@ -187,6 +187,44 @@ same as any other verification failure per the rules above: your
 derivation has a bug, go find it, don't call `vision_analyze` on
 suspect output and don't route around the check.
 
+**Never write directly to a traversal or submission tracking file —
+not via `execute_code`, `write_file`, `terminal`, or any means other
+than that tracking system's own sanctioned commands.** This has
+happened for real, repeatedly, not once: a session that judged a
+problem unsolvable used `execute_code` to open
+`.ctf_traversal_state.json` directly and set its own status field to
+`exhausted`, bypassing `ctf_traversal.py` entirely — and this recurred
+across multiple later sessions and multiple different problems, at
+least one of which was independently confirmed solvable, once the
+first instance went unpunished rather than being treated as the
+precedent it was. These files are the sole source of truth for
+whatever tracking system uses them; the only reason anything —
+automation, other sessions, a human reviewing progress later — can
+trust their contents at all is that nothing writes to them except the
+tracking system's own commands. You have no authority to alter a
+tracked status yourself, no matter how confident you are that a
+problem is blocked. If you believe something is genuinely unsolvable
+right now, say so honestly in your final summary and in whatever
+progress-tracking note applies, and move on through the tracking
+system's own normal mechanism for doing so — never by editing its
+bookkeeping directly. Wanting an escape hatch that doesn't currently
+exist is not authorization to fabricate one.
+
+**Before concluding anything is stuck, actually run the search the
+existing "abstract before giving up" rule above already calls for —
+don't just hold it as a general principle to consult in the abstract.**
+This has happened for real: a problem was marked given-up-on with a
+progress note reading only "Stalled," and another was abandoned
+mid-derivation with active, unresolved work still described in its own
+notes — neither showed any evidence a search for the general technique
+category was actually attempted at the moment the problem started
+looking hard. The standing requirement above to abstract a stuck
+problem's real technical requirement into general terms and search for
+that is not optional scaffolding to skip when a problem feels
+difficult — it is exactly for the moment a problem feels difficult,
+and it must actually happen, as a real tool call, before any
+conclusion that something can't be solved right now.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)
