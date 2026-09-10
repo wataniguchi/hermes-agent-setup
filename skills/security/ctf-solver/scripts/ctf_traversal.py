@@ -59,6 +59,11 @@ import contextlib
 
 STATE_PATH = "/workspace/.ctf_traversal_state.json"
 STATE_LOCK_PATH = STATE_PATH + ".lock"
+# Read-only from this script's own perspective — ctf_traversal.py never
+# writes here, only checks whether an in_progress problem's own note
+# records a blocker, to de-prioritize (never abandon) it in `next`'s
+# selection order. See cmd_next() for why this exists.
+PROGRESS_NOTES_DIR = "/workspace/progress-notes"
 
 # Fast, lightweight reachability check — a raw TCP connect, not a full
 # HTTP request. This is the "fast and global" requirement: checked ONCE
@@ -250,25 +255,101 @@ def needs_scope_host(fetch_result: dict) -> bool:
         and "downloadable_file" not in modes
 
 
+def _has_suspected_blocker(problem_id: str) -> bool:
+    """Whether this problem's own progress note records a Suspected
+    Blocker section. Advisory only — a missing or unreadable note is
+    treated as "no blocker recorded" rather than an error, since this
+    signal only ever de-prioritizes a problem in `next`'s selection
+    order, never changes its actual tracked status.
+    """
+    note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
+    try:
+        with open(note_path) as f:
+            return "## Suspected Blocker" in f.read()
+    except OSError:
+        return False
+
+
+def _progress_note_staleness_warning(problem_id: str, previous_returned_at):
+    """If this problem was previously handed out and its own progress
+    note was never touched afterward, return a warning string to surface
+    directly in `next`'s output. Confirmed as a real, observed gap, not
+    theoretical: a session can hold a problem for hours and leave zero
+    trace in its note, and nothing before this made that visible to
+    whichever session picks the problem up next — the note-writing
+    instruction in AGENTS.md/the sweep prompts is a judgment call the
+    model can simply fail to act on, with no mechanical enforcement.
+    Returns None when there's nothing to flag: either this is the
+    problem's first-ever handout (previous_returned_at is falsy), or the
+    note's own mtime is newer than that handout, meaning it genuinely
+    was updated since.
+    """
+    if not previous_returned_at:
+        return None
+
+    note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
+    try:
+        note_mtime = os.path.getmtime(note_path)
+    except OSError:
+        return (
+            "No progress note exists for this problem, despite it having "
+            "been handed out to a previous session (around "
+            + time.ctime(previous_returned_at) + "). Whatever that session "
+            "did is not recorded anywhere."
+        )
+
+    if note_mtime <= previous_returned_at:
+        return (
+            "This problem was returned to a previous session around "
+            + time.ctime(previous_returned_at) + ", but its progress note "
+            "has not been updated since then — real work may have "
+            "happened with no record of it. If you need that context, "
+            "check /workspace/session-exports/index.txt for a session "
+            "active around that time and read its export directly."
+        )
+
+    return None
+
+
 def cmd_next():
     with state_lock():
         state = load_state()
 
         # Deliberately includes "in_progress", not just "pending": once a
         # problem is first handed out it flips to in_progress and, before
-        # this fix, would never be returned by `next` again regardless of
-        # whether it was ever solved — leaving it permanently abandoned the
-        # moment any later problem got attempted, and letting `done: true`
-        # fire while real, unfinished work sat untouched. Walking the same
+        # an earlier fix, would never be returned by `next` again regardless
+        # of whether it was ever solved — leaving it permanently abandoned
+        # the moment any later problem got attempted. Walking the same
         # natural discovery order for both statuses means an in_progress
         # problem is picked up again before any later pending one, giving
         # progress-notes/session-export recovery (see AGENTS.md, ctf-solver
-        # SKILL.md) an actual chance to be used rather than being written
-        # for a problem `next` would never return to.
-        for problem_id, info in state["problems"].items():
-            if info["status"] not in ("pending", "in_progress"):
-                continue
-
+        # SKILL.md) an actual chance to be used.
+        #
+        # Split into two passes as of this fix: an in_progress problem
+        # whose own note records a "## Suspected Blocker" is deliberately
+        # skipped in the first pass, so one genuinely environment-blocked
+        # problem doesn't gate every later pending one forever. Confirmed
+        # as a real, live problem, not theoretical: a session explicitly
+        # reasoned "the traversal engine is linear and I cannot move to
+        # the next problem while this one remains in_progress," then
+        # burned its real remaining attempts on throwaway candidates
+        # (FLAG_exhaust_1, _2, ...) specifically to force itself past a
+        # problem it had already, correctly and honestly, recorded as
+        # blocked. The standing rules already told it that recording a
+        # blocker was enough to move on; this makes that actually true at
+        # the mechanism level instead of just a claim in the prompt text.
+        #
+        # Pass 2 (only reached if pass 1 finds nothing at all) returns
+        # from the deprioritized, blocked-and-in_progress set — not
+        # always the same one, which would just relocate the starvation
+        # problem onto whichever blocked problem sits earliest in
+        # discovery order. Whichever has gone longest without being
+        # checked (oldest last_returned_at, with a problem never yet
+        # re-checked in pass 2 treated as the oldest of all) is returned,
+        # giving every blocked problem a fair, rotating turn at
+        # re-verification instead of a permanent favorite or a permanent
+        # exile.
+        def try_return(problem_id, info):
             fetch_result = run_script(
                 state["solver_script"],
                 ["solve", info["url"], "--scope", state["scope"]],
@@ -277,7 +358,7 @@ def cmd_next():
             if fetch_result.get("_error"):
                 info["status"] = "needs_manual_review"
                 save_state(state)
-                continue
+                return False
 
             if needs_scope_host(fetch_result) and not state["scope_reachable"]:
                 # Instant, no network call — consults the cached reachability
@@ -285,11 +366,13 @@ def cmd_next():
                 # unreachability slowly for this problem too.
                 info["status"] = "skipped_unreachable"
                 save_state(state)
-                continue
+                return False
 
+            previous_returned_at = info.get("last_returned_at")
             info["status"] = "in_progress"
+            info["last_returned_at"] = time.time()
             save_state(state)
-            print(json.dumps({
+            output = {
                 "problem_id": problem_id,
                 "title": info["title"],
                 "url": info["url"],
@@ -306,8 +389,37 @@ def cmd_next():
                     "characters has broken a genuinely correct submission "
                     "before)."
                 ),
-            }, indent=2))
-            return
+            }
+            staleness_warning = _progress_note_staleness_warning(problem_id, previous_returned_at)
+            if staleness_warning:
+                output["progress_note_warning"] = staleness_warning
+            print(json.dumps(output, indent=2))
+            return True
+
+        # Pass 1: pending, or in_progress with no recorded blocker.
+        for problem_id, info in state["problems"].items():
+            if info["status"] == "pending":
+                if try_return(problem_id, info):
+                    return
+                continue
+            if info["status"] == "in_progress" and not _has_suspected_blocker(problem_id):
+                if try_return(problem_id, info):
+                    return
+                continue
+
+        # Pass 2: in_progress problems with a recorded blocker, cycled by
+        # oldest last_returned_at rather than always the same discovery-
+        # order winner.
+        blocked_candidates = [
+            (pid, info)
+            for pid, info in state["problems"].items()
+            if info["status"] == "in_progress" and _has_suspected_blocker(pid)
+        ]
+        if blocked_candidates:
+            blocked_candidates.sort(key=lambda pair: pair[1].get("last_returned_at") or 0)
+            problem_id, info = blocked_candidates[0]
+            if try_return(problem_id, info):
+                return
 
         print(json.dumps({
             "done": True,

@@ -66,6 +66,13 @@ STEP 2 — the loop. Do this repeatedly:
    every other step in this loop, not a narrated summary — write the
    file and continue immediately into the next step, do not describe
    its contents in chat.
+   If instead that submit call was the one that lands this problem on
+   "exhausted" (5 real attempts genuinely used, not bypassed): write a
+   closing note to progress-notes/problem_<id>.md the same way — what
+   was actually tried across the real attempts and your best honest
+   read on why it's suspected to have failed. Nothing else records
+   this once ctf_traversal.py will never return the problem again; the
+   only audience left for it is a human revisiting the problem later.
 8. Go back to step 1.
 
 Never edit /workspace/.ctf_traversal_state.json or

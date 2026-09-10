@@ -158,6 +158,24 @@ step in the loop, not a narrated summary — write the file and continue
 immediately into the next `next` call; do not describe its contents in
 chat, per the no-narration rule below.
 
+**On a submit that lands a problem on `exhausted`, close out its
+progress note the same way — this is the third outcome the existing
+write-up/Suspected-Blocker pair doesn't cover.** A solve gets a
+write-up; a problem judged blocked *before* guessing further gets a
+Suspected Blocker section; but genuine exhaustion through five real
+attempts can arrive with neither — mid-derivation, on whatever
+candidate turned out to be the fifth, with no moment where the model
+paused to declare it blocked first. Confirmed as a real gap, not
+theoretical: a problem reached `exhausted` this way and its
+progress-notes file was left completely empty, discarding the entire
+derivation history the moment `ctf_traversal.py` stopped ever
+returning it again. Since no future automated session will ever
+revisit an `exhausted` problem, this note's only real audience is a
+human doing so manually later — write what was actually tried across
+the real attempts and your best honest read on why it's suspected to
+have failed, the same ordinary-tool-call discipline as the write-up
+above, not a narrated summary.
+
 **Skill improvement notes — capture, don't patch.** Background curator
 writes require the target skill to be curator-managed (`hermes curator
 adopt <name>`) — but even once adopted, confirmed directly that the

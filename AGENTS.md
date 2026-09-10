@@ -225,6 +225,23 @@ difficult — it is exactly for the moment a problem feels difficult,
 and it must actually happen, as a real tool call, before any
 conclusion that something can't be solved right now.
 
+**When a problem's real attempt cap is genuinely exhausted — not
+bypassed, actually exhausted through five real submissions — write a
+closing note to that problem's own progress-tracking file before
+moving on.** This is a real, legitimate outcome the existing rules
+don't currently cover: it isn't a solve (no write-up trigger), and it
+isn't necessarily a moment where you paused to judge the problem
+blocked before guessing further (no Suspected Blocker trigger either)
+— exhaustion can arrive silently, mid-derivation, on whatever candidate
+happened to be the fifth one tried. Nothing else records what was
+actually attempted or why it's suspected to have failed once
+`ctf_traversal.py` will never hand this problem back to any session
+again. The note is for whoever revisits this problem later — most
+likely a human, since no future automated session ever will — not for
+the traversal engine's own bookkeeping. Cover: what was tried across
+the real attempts, the actual derivation logic behind the candidates,
+and your best honest guess at what was wrong, if you have one.
+
 ## Current CTF challenge scope
 
 Active platform: ksnctf (https://ksnctf.sweetduet.info/)
