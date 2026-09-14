@@ -20,6 +20,12 @@ GEMMA_KSNCTF_FETCH_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/
 GEMMA_KSNCTF_SUBMIT_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ksnctf-submit"
 GEMMA_KSNCTF_DISCOVER_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ksnctf-discover"
 GEMMA_CTF_SOLVER_DIR="$HOME/.hermes/profiles/gemma-experiment/skills/security/ctf-solver"
+QWEN_SKILL_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/windows-binary-analysis"
+QWEN_BINARY_SKILL_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/binary-static-analysis"
+QWEN_KSNCTF_FETCH_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ksnctf-fetch"
+QWEN_KSNCTF_SUBMIT_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ksnctf-submit"
+QWEN_KSNCTF_DISCOVER_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ksnctf-discover"
+QWEN_CTF_SOLVER_DIR="$HOME/.hermes/profiles/qwen-experiment/skills/security/ctf-solver"
 
 check() {
   local repo_file="$1"
@@ -74,6 +80,22 @@ check "$REPO/skills/security/windows-binary-analysis/scripts/pyghidra_tool.py" \
       "pyghidra_tool.py (gemma-experiment)"
 
 
+echo ""
+echo "=== Skill files: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/windows-binary-analysis/SKILL.md" \
+      "$QWEN_SKILL_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/analyze_windows_binary.py" \
+      "$QWEN_SKILL_DIR/scripts/analyze_windows_binary.py" \
+      "analyze_windows_binary.py (qwen-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/gui_probe.ps1" \
+      "$QWEN_SKILL_DIR/scripts/gui_probe.ps1" \
+      "gui_probe.ps1 (qwen-experiment)"
+check "$REPO/skills/security/windows-binary-analysis/scripts/pyghidra_tool.py" \
+      "$QWEN_SKILL_DIR/scripts/pyghidra_tool.py" \
+      "pyghidra_tool.py (qwen-experiment)"
+
+
 
 echo ""
 echo "=== binary-static-analysis skill: repo -> default profile ==="
@@ -93,6 +115,16 @@ check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
 check "$REPO/skills/security/binary-static-analysis/scripts/binary_analysis.py" \
       "$GEMMA_BINARY_SKILL_DIR/scripts/binary_analysis.py" \
       "binary_analysis.py (gemma-experiment)"
+
+
+echo ""
+echo "=== binary-static-analysis skill: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/binary-static-analysis/SKILL.md" \
+      "$QWEN_BINARY_SKILL_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/binary-static-analysis/scripts/binary_analysis.py" \
+      "$QWEN_BINARY_SKILL_DIR/scripts/binary_analysis.py" \
+      "binary_analysis.py (qwen-experiment)"
 
 
 
@@ -116,6 +148,16 @@ check "$REPO/skills/security/ksnctf-fetch/scripts/ksnctf_fetch.py" \
       "ksnctf_fetch.py (gemma-experiment)"
 
 
+echo ""
+echo "=== ksnctf-fetch skill: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/ksnctf-fetch/SKILL.md" \
+      "$QWEN_KSNCTF_FETCH_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/ksnctf-fetch/scripts/ksnctf_fetch.py" \
+      "$QWEN_KSNCTF_FETCH_DIR/scripts/ksnctf_fetch.py" \
+      "ksnctf_fetch.py (qwen-experiment)"
+
+
 
 echo ""
 echo "=== ksnctf-submit skill: repo -> default profile ==="
@@ -137,6 +179,16 @@ check "$REPO/skills/security/ksnctf-submit/scripts/submit_flag.py" \
       "submit_flag.py (gemma-experiment)"
 
 
+echo ""
+echo "=== ksnctf-submit skill: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/ksnctf-submit/SKILL.md" \
+      "$QWEN_KSNCTF_SUBMIT_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/ksnctf-submit/scripts/submit_flag.py" \
+      "$QWEN_KSNCTF_SUBMIT_DIR/scripts/submit_flag.py" \
+      "submit_flag.py (qwen-experiment)"
+
+
 
 echo ""
 echo "=== ksnctf-discover skill: repo -> default profile ==="
@@ -156,6 +208,16 @@ check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
 check "$REPO/skills/security/ksnctf-discover/scripts/ksnctf_discover.py" \
       "$GEMMA_KSNCTF_DISCOVER_DIR/scripts/ksnctf_discover.py" \
       "ksnctf_discover.py (gemma-experiment)"
+
+
+echo ""
+echo "=== ksnctf-discover skill: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/ksnctf-discover/SKILL.md" \
+      "$QWEN_KSNCTF_DISCOVER_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/ksnctf-discover/scripts/ksnctf_discover.py" \
+      "$QWEN_KSNCTF_DISCOVER_DIR/scripts/ksnctf_discover.py" \
+      "ksnctf_discover.py (qwen-experiment)"
 
 
 
@@ -185,6 +247,19 @@ check "$REPO/skills/security/ctf-solver/scripts/ctf_traversal.py" \
       "ctf_traversal.py (gemma-experiment)"
 
 
+echo ""
+echo "=== ctf-solver skill: repo -> qwen-experiment profile ==="
+check "$REPO/skills/security/ctf-solver/SKILL.md" \
+      "$QWEN_CTF_SOLVER_DIR/SKILL.md" \
+      "SKILL.md (qwen-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_solver.py" \
+      "$QWEN_CTF_SOLVER_DIR/scripts/ctf_solver.py" \
+      "ctf_solver.py (qwen-experiment)"
+check "$REPO/skills/security/ctf-solver/scripts/ctf_traversal.py" \
+      "$QWEN_CTF_SOLVER_DIR/scripts/ctf_traversal.py" \
+      "ctf_traversal.py (qwen-experiment)"
+
+
 
 echo ""
 echo "=== AGENTS.md: repo root (loaded by working directory, not per-profile — no separate deploy step needed as long as both profiles launch from this repo root) ==="
@@ -205,38 +280,57 @@ fi
 check "$REPO/AGENTS.md" \
       "$HOME/.hermes/profiles/gemma-experiment/AGENTS.md" \
       "AGENTS.md (gemma-experiment profile copy — same unconfirmed-relevance caveat as above)"
+check "$REPO/AGENTS.md" \
+      "$HOME/.hermes/profiles/qwen-experiment/AGENTS.md" \
+      "AGENTS.md (qwen-experiment profile copy — same unconfirmed-relevance caveat as above)"
 
 echo ""
-echo "=== ksnctf-submit guardrail state: current attempt counts and status per problem ==="
+echo "=== ksnctf-submit guardrail state: status, attempts, and last-returned time for every problem ==="
 # /workspace only exists inside the Docker container — this script runs
 # on the host, so the real path is the bind-mount SOURCE directory, not
 # the container-internal path the Python script itself uses.
 KSNCTF_LOG="$REPO/workspace/.ksnctf_submission_log.json"
 TRAVERSAL_STATE="$REPO/workspace/.ctf_traversal_state.json"
-if [[ -f "$KSNCTF_LOG" ]]; then
+# Anchored on the TRAVERSAL STATE file now, not the submission log —
+# the log only ever contains problems that reached at least one real
+# submission, so anchoring there silently hid every pending/in_progress
+# problem that hadn't been submitted to yet. The state file's own
+# "problems" dict is the actual complete set (all 41 for ksnctf),
+# regardless of submission history.
+if [[ -f "$TRAVERSAL_STATE" ]]; then
   python3 -c "
 import json
+import datetime
 
-with open('$KSNCTF_LOG') as f:
-    log = json.load(f)
+with open('$TRAVERSAL_STATE') as f:
+    state = json.load(f)
+problems = state.get('problems', {})
 
-status_by_id = {}
 try:
-    with open('$TRAVERSAL_STATE') as f:
-        state = json.load(f)
-    for pid, info in state.get('problems', {}).items():
-        status_by_id[pid] = info.get('status', 'unknown')
+    with open('$KSNCTF_LOG') as f:
+        log = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
-    pass  # traversal state unavailable — status column omitted below
+    log = {}  # no submissions yet at all — every problem shows 0/5 below
 
-if not log:
-    print('  (log exists but is empty — no submissions recorded yet)')
-for problem_id, attempts in log.items():
-    status = status_by_id.get(problem_id, 'status unknown (no traversal state entry)')
-    print(f'  problem {problem_id}: {status} ({len(attempts)}/5 attempts used)')
-" 2>/dev/null || echo "  (log file exists but could not be parsed as JSON)"
+if not problems:
+    print('  (traversal state exists but contains no problems — was init run correctly?)')
+
+JST = datetime.timezone(datetime.timedelta(hours=9))
+for problem_id in sorted(problems.keys(), key=int):
+    info = problems[problem_id]
+    status = info.get('status', 'unknown')
+    attempts = len(log.get(problem_id, []))
+
+    last_returned_at = info.get('last_returned_at')
+    jst_suffix = ''
+    if last_returned_at:
+        dt_jst = datetime.datetime.fromtimestamp(last_returned_at, tz=JST)
+        jst_suffix = f\", last returned: {dt_jst.strftime('%Y-%m-%d %H:%M:%S JST')}\"
+
+    print(f'  problem {problem_id}: {status} ({attempts}/5 attempts used){jst_suffix}')
+" 2>/dev/null || echo "  (traversal state file exists but could not be parsed as JSON)"
 else
-  echo "  (no log yet — $KSNCTF_LOG does not exist)"
+  echo "  (no traversal state yet — $TRAVERSAL_STATE does not exist; run init first)"
 fi
 
 echo ""
