@@ -315,6 +315,20 @@ def cmd_next():
     with state_lock():
         state = load_state()
 
+        # The "held" problem: whichever in_progress problem was most
+        # recently handed out, identified as the one with the highest
+        # last_returned_at among currently in_progress problems. Used
+        # below to gate advancing to a genuinely different problem
+        # until this one's own note has actually been touched since
+        # that handout — see the gate inside try_return() for why.
+        held_id, held_ts = None, -1
+        for pid, info in state["problems"].items():
+            if info["status"] != "in_progress":
+                continue
+            ts = info.get("last_returned_at")
+            if ts is not None and ts > held_ts:
+                held_id, held_ts = pid, ts
+
         # Deliberately includes "in_progress", not just "pending": once a
         # problem is first handed out it flips to in_progress and, before
         # an earlier fix, would never be returned by `next` again regardless
@@ -349,6 +363,20 @@ def cmd_next():
         # giving every blocked problem a fair, rotating turn at
         # re-verification instead of a permanent favorite or a permanent
         # exile.
+        #
+        # A separate, real gap confirmed directly, not theoretical: a
+        # session can do substantial genuine work on the held problem —
+        # real execute_code/terminal/web_search activity, dozens of tool
+        # calls — and still call `next` afterward having never touched
+        # that problem's own progress note, discarding all of it exactly
+        # like the case that motivated the staleness *warning* above.
+        # The warning alone only reports this after the fact, on some
+        # later session's handout of the held problem — it does nothing
+        # to prevent the loss in the first place. The gate inside
+        # try_return() below escalates the same check from a warning to
+        # an actual refusal to advance, for the one case that's actually
+        # preventable: don't let `next` hand out a genuinely different
+        # problem while the one just worked still has a stale note.
         def try_return(problem_id, info):
             fetch_result = run_script(
                 state["solver_script"],
@@ -367,6 +395,33 @@ def cmd_next():
                 info["status"] = "skipped_unreachable"
                 save_state(state)
                 return False
+
+            # Gate: refuse to advance to a genuinely different problem
+            # than whichever was just held, while the held one's own
+            # note is still stale relative to its own last handout. No
+            # state mutation happens on a refusal — the held problem's
+            # status/timestamp are untouched, so the very next `next`
+            # call re-evaluates from scratch once the note is updated
+            # (or the held problem is resolved via submit).
+            if held_id is not None and problem_id != held_id:
+                warning = _progress_note_staleness_warning(held_id, held_ts)
+                if warning:
+                    held_title = state["problems"][held_id]["title"]
+                    print(json.dumps({
+                        "blocked": True,
+                        "reason": (
+                            f"Refusing to move on to problem {problem_id} "
+                            f"({info['title']}) because problem {held_id} "
+                            f"({held_title}) is the one that was just handed "
+                            f"out, and its own progress note hasn't been "
+                            f"touched since then. " + warning + " Update "
+                            f"/workspace/progress-notes/problem_{held_id}.md "
+                            f"with whatever was actually tried this turn — "
+                            f"even a brief note satisfies this — or resolve "
+                            f"it via submit, then call `next` again."
+                        ),
+                    }, indent=2))
+                    return True
 
             previous_returned_at = info.get("last_returned_at")
             info["status"] = "in_progress"
