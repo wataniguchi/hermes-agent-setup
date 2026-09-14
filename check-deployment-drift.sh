@@ -301,6 +301,7 @@ if [[ -f "$TRAVERSAL_STATE" ]]; then
   python3 -c "
 import json
 import datetime
+import os
 
 with open('$TRAVERSAL_STATE') as f:
     state = json.load(f)
@@ -315,11 +316,38 @@ except (FileNotFoundError, json.JSONDecodeError):
 if not problems:
     print('  (traversal state exists but contains no problems — was init run correctly?)')
 
+# Matches ctf_traversal.py's own PROGRESS_NOTES_DIR — same bind-mount
+# caveat as the state/log paths above: this script runs on the host, so
+# the real path is the mount source, not the container-internal one.
+PROGRESS_NOTES_DIR = '$REPO/workspace/progress-notes'
+
+def is_blocked(problem_id):
+    # Mirrors ctf_traversal.py's own _has_suspected_blocker check: a
+    # progress note exists and contains a Suspected Blocker section.
+    # 'blocked' isn't a real status in the state machine (only pending/
+    # in_progress/solved/exhausted/skipped_unreachable/
+    # needs_manual_review are) — this is a derived, display-only
+    # annotation layered on top of a genuine in_progress status, not a
+    # replacement for it, so the real status stays visible/greppable.
+    note_path = os.path.join(PROGRESS_NOTES_DIR, f'problem_{problem_id}.md')
+    if not os.path.isfile(note_path):
+        return False
+    try:
+        with open(note_path) as f:
+            content = f.read()
+    except OSError:
+        return False
+    return '## Suspected Blocker' in content
+
 JST = datetime.timezone(datetime.timedelta(hours=9))
 for problem_id in sorted(problems.keys(), key=int):
     info = problems[problem_id]
     status = info.get('status', 'unknown')
     attempts = len(log.get(problem_id, []))
+
+    status_display = status
+    if status == 'in_progress' and is_blocked(problem_id):
+        status_display = 'in_progress [blocked]'
 
     last_returned_at = info.get('last_returned_at')
     jst_suffix = ''
@@ -327,7 +355,7 @@ for problem_id in sorted(problems.keys(), key=int):
         dt_jst = datetime.datetime.fromtimestamp(last_returned_at, tz=JST)
         jst_suffix = f\", last returned: {dt_jst.strftime('%Y-%m-%d %H:%M:%S JST')}\"
 
-    print(f'  problem {problem_id}: {status} ({attempts}/5 attempts used){jst_suffix}')
+    print(f'  problem {problem_id}: {status_display} ({attempts}/5 attempts used){jst_suffix}')
 " 2>/dev/null || echo "  (traversal state file exists but could not be parsed as JSON)"
 else
   echo "  (no traversal state yet — $TRAVERSAL_STATE does not exist; run init first)"
