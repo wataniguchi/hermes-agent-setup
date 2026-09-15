@@ -340,6 +340,19 @@ def is_blocked(problem_id):
     return '## Suspected Blocker' in content
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
+
+def solved_at(problem_id):
+    # For a solved problem, 'last returned' (when next() last handed it
+    # out) is less meaningful than when it was actually confirmed
+    # correct — find the real true-result log entry instead. Guards
+    # against the unlikely case of more than one true entry (shouldn't
+    # happen given the duplicate-candidate guardrail, but state could
+    # in principle be reset and resubmitted) by taking the earliest.
+    true_entries = [a for a in log.get(problem_id, []) if a.get('result') is True]
+    if not true_entries:
+        return None
+    return min(a['timestamp'] for a in true_entries)
+
 for problem_id in sorted(problems.keys(), key=int):
     info = problems[problem_id]
     status = info.get('status', 'unknown')
@@ -349,13 +362,22 @@ for problem_id in sorted(problems.keys(), key=int):
     if status == 'in_progress' and is_blocked(problem_id):
         status_display = 'in_progress [blocked]'
 
-    last_returned_at = info.get('last_returned_at')
-    jst_suffix = ''
-    if last_returned_at:
-        dt_jst = datetime.datetime.fromtimestamp(last_returned_at, tz=JST)
-        jst_suffix = f\", last returned: {dt_jst.strftime('%Y-%m-%d %H:%M:%S JST')}\"
+    time_suffix = ''
+    if status == 'solved':
+        ts = solved_at(problem_id)
+        if ts:
+            dt_jst = datetime.datetime.fromtimestamp(ts, tz=JST)
+            time_suffix = f\", submitted: {dt_jst.strftime('%Y-%m-%d %H:%M:%S JST')}\"
+        # else: solved but no matching log entry found — degrade
+        # gracefully to no timestamp rather than show something
+        # potentially misleading (e.g. an unrelated last_returned_at).
+    else:
+        last_returned_at = info.get('last_returned_at')
+        if last_returned_at:
+            dt_jst = datetime.datetime.fromtimestamp(last_returned_at, tz=JST)
+            time_suffix = f\", last returned: {dt_jst.strftime('%Y-%m-%d %H:%M:%S JST')}\"
 
-    print(f'  problem {problem_id}: {status_display} ({attempts}/5 attempts used){jst_suffix}')
+    print(f'  problem {problem_id}: {status_display} ({attempts}/5 attempts used){time_suffix}')
 " 2>/dev/null || echo "  (traversal state file exists but could not be parsed as JSON)"
 else
   echo "  (no traversal state yet — $TRAVERSAL_STATE does not exist; run init first)"
