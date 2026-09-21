@@ -187,6 +187,22 @@ same as any other verification failure per the rules above: your
 derivation has a bug, go find it, don't call `vision_analyze` on
 suspect output and don't route around the check.
 
+**Read back a file immediately after writing it, whenever the write is
+long enough to matter or the file's correctness will be relied on
+later.** This is a separate, confirmed issue from the one above — not
+a derivation bug, a tool-level one: `write_file` has been directly
+observed truncating and corrupting content on real, substantial
+writes, including one case where a `patch` operation produced a
+literally malformed line (`i += 1rt rdpcap, TCP, IP`) that a later
+session then spent real effort debugging as if it were a logic error.
+A session even diagnosed this about itself mid-turn: *"write_file
+truncation issue: ... indicates the tool is truncating content."*
+Don't trust a write succeeded just because the tool call itself didn't
+error — for anything you intend to run, submit, or hand to a future
+session as settled, `read_file` it back right after writing and
+confirm the content is actually what you meant to write, the same way
+you'd verify a computed value rather than trust it on sight.
+
 **Never write directly to a traversal or submission tracking file —
 not via `execute_code`, `write_file`, `terminal`, or any means other
 than that tracking system's own sanctioned commands.** This has

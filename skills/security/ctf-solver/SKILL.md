@@ -123,6 +123,43 @@ exists is to survive stops that arrive with no warning. When `next`
 returns a problem that already has one of these files, read it before
 doing anything else.
 
+**A note existing and being read is not the same as it being used —
+confirmed as a real, repeated gap, not theoretical.** One problem had
+its hardest sub-result — a genuinely proven, verified technique —
+independently rediscovered from scratch across three separate
+sessions, each unaware the others had already reached it, because
+nothing in the note distinguished "this is settled, confirmed working"
+from the surrounding speculative attempts. Three concrete practices
+close this:
+
+- **Verified results get their own section, separate from exploratory
+  attempts.** If part of a derivation is independently confirmed —
+  not just plausible, but checked against real evidence (a decrypted
+  value that's internally consistent, a signature that validates,
+  output matching an expected structure) — record it under its own
+  `## Proven` heading, distinct from `## Attempts` or general findings.
+  Never let a settled result sit undifferentiated among guesses; that's
+  exactly what causes it to be silently re-derived later.
+- **Correct an existing note in place when it's wrong, not just in
+  your own reasoning.** A later session correctly identified an error
+  in an earlier note's own technical claim — right there in its
+  reasoning — but never fixed the file itself, so the next session to
+  read it hit the identical wrong lead. A future session only ever
+  sees the file, not the reasoning that noticed the mistake; if you've
+  verified something in a note is wrong, update the note itself before
+  moving on.
+- **A canonical current-best file, for problems accumulating many
+  scratch scripts.** One problem reached over fifty script files
+  (`q33_solve3.py`, `q33_definitive.py`, `q33_clean.py`, and dozens
+  more) with no way for a future session to tell which one, if any,
+  represented genuine current progress versus an abandoned attempt.
+  When a script reaches a new, verified milestone, also copy it to
+  `/workspace/current_<id>.py`, overwriting any earlier version — one
+  fixed, predictable path a future session can trust as the actual
+  state of the art, rather than searching scratch files by name. This
+  only helps if it's actually followed; nothing enforces it beyond the
+  habit itself.
+
 **`in_progress`'s revisit behavior creates real pressure to want an
 escape hatch — that pressure has been misused for real, more than
 once, and the fix is not to build the hatch.** Since a genuinely

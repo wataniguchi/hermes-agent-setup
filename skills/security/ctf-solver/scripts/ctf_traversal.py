@@ -311,6 +311,76 @@ def _progress_note_staleness_warning(problem_id: str, previous_returned_at):
     return None
 
 
+# General cadence guidance, restated on every next/submit/status call so
+# it survives context compaction over a long session -- unlike a
+# one-time instruction loaded once at session start into a context that
+# may later be compacted away, this is baked into the routine tool
+# output itself, every time. Escalates to an explicit warning once the
+# interval is exceeded. Confirmed as a real, otherwise-uncovered gap:
+# a session worked one problem continuously for 9+ hours across 146
+# tool calls -- touching ctf_traversal.py only a handful of times, once
+# via a status() call roughly 6.5 hours in, nearly 3 hours before the
+# session's own end -- and never updated that problem's progress note
+# once, in the entire session. Every check built before this one only
+# fires at problem handout or hand-off time; nothing previously fired
+# *during* a long stretch of continuous work on the same problem.
+NOTE_UPDATE_REMINDER_SECONDS = 60 * 60  # 1 hour; a starting point, not tuned
+
+
+def _note_cadence_message(problem_id: str) -> str:
+    """Routine reminder text for how often a progress note should be
+    touched, escalating to an explicit warning once
+    NOTE_UPDATE_REMINDER_SECONDS have passed since the note's own
+    mtime. Always returns a string, never None -- meant to be included
+    unconditionally on every next/submit/status call, not gated behind
+    a check like the handout-time notices above. A problem with no
+    note yet is not treated as overdue by this alone; that case is
+    already covered separately by the missing-note branch of the
+    staleness warning above.
+    """
+    note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
+    minutes = NOTE_UPDATE_REMINDER_SECONDS // 60
+    routine = (
+        f"Progress-note cadence: update "
+        f"/workspace/progress-notes/problem_{problem_id}.md at least "
+        f"every {minutes} minutes of active work on this problem, not "
+        f"only once at a natural stopping point."
+    )
+    try:
+        age_seconds = time.time() - os.path.getmtime(note_path)
+    except OSError:
+        return routine
+
+    if age_seconds > NOTE_UPDATE_REMINDER_SECONDS:
+        return (
+            f"WARNING — overdue: this problem's progress note has not "
+            f"been touched in {int(age_seconds // 60)} minutes, past "
+            f"the {minutes}-minute cadence. Update "
+            f"/workspace/progress-notes/problem_{problem_id}.md now with "
+            f"whatever's been tried and found so far, even if nothing is "
+            f"fully resolved yet — do not wait for a natural stopping "
+            f"point."
+        )
+    return routine
+
+
+def _find_held_problem(state):
+    """The in_progress problem most recently handed out, identified as
+    the one with the highest last_returned_at. Returns (None, None) if
+    no in_progress problem has ever been returned. Mirrors cmd_next's
+    own held-problem detection; used by cmd_status, which has no
+    specific problem_id of its own to check cadence against.
+    """
+    held_id, held_ts = None, -1
+    for pid, info in state["problems"].items():
+        if info["status"] != "in_progress":
+            continue
+        ts = info.get("last_returned_at")
+        if ts is not None and ts > held_ts:
+            held_id, held_ts = pid, ts
+    return held_id, held_ts
+
+
 def cmd_next():
     with state_lock():
         state = load_state()
@@ -448,6 +518,41 @@ def cmd_next():
             staleness_warning = _progress_note_staleness_warning(problem_id, previous_returned_at)
             if staleness_warning:
                 output["progress_note_warning"] = staleness_warning
+
+            # Unconditional, regardless of staleness -- confirmed as a
+            # real, distinct failure mode from the staleness check
+            # above: a session saw (via a separate `ls`) that a
+            # substantial prior note existed, then issued a `write_file`
+            # that overwrote it in the *same batch*, before that
+            # separate check's result could actually inform whether
+            # writing was safe -- destroying it without ever reading it.
+            # A staleness warning issued on a *later* handout can't
+            # prevent this; it only reports the damage after the fact.
+            # Stating existence directly in this same, single response
+            # -- the one call a session must already have in hand before
+            # it can know which problem it's even working on -- removes
+            # the second, separately-timed check that raced the write.
+            note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
+            if os.path.isfile(note_path):
+                try:
+                    note_size = os.path.getsize(note_path)
+                    size_str = f"{note_size} bytes"
+                except OSError:
+                    size_str = "unknown size"
+                output["existing_progress_note"] = (
+                    f"A progress note already exists for this problem at "
+                    f"{note_path} ({size_str}). Read it before doing "
+                    f"anything else with this problem -- including before "
+                    f"any write_file call to this same path, even one "
+                    f"issued in the same turn as a check on this file. A "
+                    f"destructive overwrite issued alongside a check, "
+                    f"without waiting on that check's own result, has "
+                    f"happened for real and destroyed a prior session's "
+                    f"substantial genuine progress."
+                )
+
+            output["note_update_reminder"] = _note_cadence_message(problem_id)
+
             print(json.dumps(output, indent=2))
             return True
 
@@ -523,6 +628,7 @@ def cmd_submit(problem_id: str, candidate: str):
         # network-error result, leaves status as "in_progress" — both
         # remain legitimately retryable.
 
+        result["note_update_reminder"] = _note_cadence_message(problem_id)
         print(json.dumps(result, indent=2))
 
 
@@ -535,12 +641,16 @@ def summarize(state: dict) -> dict:
 
 def cmd_status():
     state = load_state()
-    print(json.dumps({
+    output = {
         "scope": state["scope"],
         "scope_reachable": state["scope_reachable"],
         "summary": summarize(state),
         "problems": state["problems"],
-    }, indent=2))
+    }
+    held_id, _ = _find_held_problem(state)
+    if held_id is not None:
+        output["note_update_reminder"] = _note_cadence_message(held_id)
+    print(json.dumps(output, indent=2))
 
 
 def main():

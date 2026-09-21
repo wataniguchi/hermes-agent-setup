@@ -16,7 +16,13 @@ STEP 2 — the loop. Do this repeatedly:
    /workspace/progress-notes/problem_<id>.md, read it before doing
    anything else — a previous session may have left a partial
    derivation, ruled-out approaches, or a concrete next step to try.
-   Don't re-derive from scratch what's already been worked out.
+   Don't re-derive from scratch what's already been worked out. If
+   anything in that note turns out to be wrong — verified against real
+   evidence, not just a hunch — correct the file itself before
+   continuing, not just in your own reasoning; a future session only
+   ever sees the file. Also check for /workspace/current_<id>.py — the
+   canonical latest-verified script for this problem, if a prior
+   session left one — before searching scratch files by name.
 2. Derive the actual flag using real tools — binary-static-analysis for
    files, john/hashcat for password/hash cracking (a real wordlist
    exists at /usr/share/wordlists/rockyou.txt; never hand-roll a
@@ -32,7 +38,23 @@ STEP 2 — the loop. Do this repeatedly:
    this turn ends, including an *involuntary* end (a text-only response
    with no tool call, a budget cutoff, a crash) that gives no warning
    beforehand. Treat this the same as saving your work regularly, not
-   as a special end-of-turn action. If you become genuinely convinced
+   as a special end-of-turn action. As a concrete floor, not a target
+   to relax toward: update the note at least every 60 minutes of active
+   work on the same problem, even if nothing is fully resolved yet —
+   confirmed as a real gap, not theoretical: a session worked one
+   problem continuously for over 9 hours and never touched its note
+   once. next/submit/status all state this same cadence and escalate
+   to an explicit warning once a note is overdue; treat that warning as
+   seriously as any other standing rule. If any part of your derivation
+   is independently verified — not just plausible, but confirmed
+   working — record it under its own "## Proven" heading, separate
+   from attempts
+   or speculation; this has been lost before, causing the same hard
+   result to be re-derived from scratch across several later sessions.
+   If a script reaches a new, verified milestone, also copy it to
+   /workspace/current_<id>.py, overwriting any earlier version, so a
+   future session can trust one fixed path instead of guessing which
+   of many scratch files is current. If you become genuinely convinced
    this problem is currently blocked, see the note near the end of
    this prompt about "## Suspected Blocker" before doing anything else
    about it.
