@@ -331,12 +331,11 @@ def _note_cadence_message(problem_id: str) -> str:
     """Routine reminder text for how often a progress note should be
     touched, escalating to an explicit warning once
     NOTE_UPDATE_REMINDER_SECONDS have passed since the note's own
-    mtime. Always returns a string, never None -- meant to be included
-    unconditionally on every next/submit/status call, not gated behind
-    a check like the handout-time notices above. A problem with no
-    note yet is not treated as overdue by this alone; that case is
-    already covered separately by the missing-note branch of the
-    staleness warning above.
+    mtime -- or since this problem was first handed out, if no note
+    has ever been created at all. Always returns a string, never
+    None -- meant to be included unconditionally on every
+    next/submit/status call, not gated behind a check like the
+    handout-time notices above.
     """
     note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
     minutes = NOTE_UPDATE_REMINDER_SECONDS // 60
@@ -349,7 +348,19 @@ def _note_cadence_message(problem_id: str) -> str:
     try:
         age_seconds = time.time() - os.path.getmtime(note_path)
     except OSError:
-        return routine
+        # Confirmed real gap, not theoretical: a note that has never
+        # been created at all was previously treated the same as one
+        # freshly touched, since there was no mtime to compare against
+        # -- meaning a problem worked for 9+ hours with zero notes ever
+        # written could still show the routine message, never the
+        # warning. A never-created note is the maximally overdue case,
+        # not a non-issue; state's own last_returned_at is the fallback
+        # reference point once a note itself doesn't exist to check.
+        info = load_state()["problems"].get(problem_id, {})
+        handout_ts = info.get("last_returned_at")
+        if handout_ts is None:
+            return routine  # never handed out at all -- nothing to be overdue against yet
+        age_seconds = time.time() - handout_ts
 
     if age_seconds > NOTE_UPDATE_REMINDER_SECONDS:
         return (
@@ -598,6 +609,36 @@ def cmd_submit(problem_id: str, candidate: str):
                           "traversal's problem set — check for a typo.",
             }, indent=2))
             sys.exit(1)
+
+        # Hard gate, deliberately narrower than it might first appear: only
+        # submit is blocked here, not status or next. A blocked submit costs
+        # nothing -- this check runs before run_script ever reaches the real
+        # submit tool, so no real attempt is spent refusing one. status was
+        # considered and rejected: it's how a session orients itself, costs
+        # nothing to call, and returns no scarce resource -- blocking a free
+        # read risks leaving a confused session more lost, not less, for no
+        # real gain. Submit is different: it's the one place a soft warning
+        # being visible and still ignored has already happened for real --
+        # a session saw this exact WARNING twice and submitted twice more
+        # anyway, both wrong, while a five-day-old destructive-overwrite
+        # stub sat untouched the whole time. This does not fix the deeper,
+        # unfixable gap (a session that calls no ctf_traversal.py command at
+        # all for hours can't be reached by anything living in this file) --
+        # it only guarantees that the one moment already shown to fail
+        # silently now costs a real, visible refusal instead.
+        cadence_msg = _note_cadence_message(problem_id)
+        if cadence_msg.startswith("WARNING"):
+            print(json.dumps({
+                "blocked": True,
+                "reason": (
+                    cadence_msg + " Submission refused until this is "
+                    "addressed — touch the note (even a one-line update "
+                    "satisfies this check), then retry the identical "
+                    "submit call. No attempt has been consumed by this "
+                    "refusal."
+                ),
+            }, indent=2))
+            return
 
         result = run_script(state["submit_script"], ["submit", problem_id, candidate])
 

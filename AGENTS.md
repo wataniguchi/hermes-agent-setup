@@ -165,6 +165,52 @@ that would apply to *any* problem needing the same underlying technique,
 not just this one, and search for that — this comes before concluding
 anything is genuinely beyond reach, not after.
 
+**When a multi-stage pipeline has a downstream stage with a known,
+quantifiable tolerance for imperfect input — error correction, fuzzy
+matching, partial credit — run the whole pipeline end-to-end with your
+current best-effort intermediate output before perfecting any single
+stage in isolation.** A proxy metric for an intermediate stage's
+quality (a clustering distance, a confidence score, a match
+percentage) doesn't tell you whether that stage is *good enough* — the
+actual downstream consumer does, directly and unambiguously, and is
+almost always cheaper to run than continuing to refine blind. This has
+happened for real: a session correctly computed a Reed-Solomon
+decoder's exact error tolerance (up to 37% per block) at the very
+start of a derivation, built and rigorously verified the decoder
+itself, then treated an unrelated, indirect clustering-quality number
+as a gate to clear before ever running that decoder against real data
+— when the decoder's own pass/fail output on a first, imperfect
+attempt would have been a far more direct, informative answer than any
+amount of further upstream refinement. If a downstream stage exists
+and is ready, use it as a diagnostic tool on partial or best-guess
+input, not only as the final step once an earlier stage feels
+complete.
+
+**When deriving a data format from a reference implementation, give the
+simple-looking driver code around a complex algorithm the same
+line-by-line scrutiny as the algorithm itself — the actual authoritative
+structure often lives there, not in the dense part that looks like it
+needs the careful reading.** A complex core (a finite-field class, a
+polynomial implementation) invites exactly the close tracing it needs;
+a few plain lines of surrounding I/O or assembly code look simple
+enough to skim and pattern-match against a common convention instead
+of reading literally — and a common convention is not the same claim
+as what this specific file actually does. This has happened for real:
+a reference encoder's core algorithm was traced and correctly
+reimplemented in detail, but its actual output-assembly step —
+building the full payload as [all data][all parity] in two separate,
+concatenated regions — was read as the far more common convention of
+interleaved [data][parity] blocks, because that convention is
+genuinely dominant elsewhere and the assembly code itself was only a
+few plain lines. The result decoded nothing, for a reason entirely
+upstream of and invisible to any amount of algorithm-level or
+classification-level debugging, because every extracted "block" spliced
+together bytes from unrelated regions of the real stream. Read the
+lines that assemble, order, or combine pieces of data with the same
+literalness as the lines that transform them — never substitute a
+standard pattern for what a specific reference implementation is
+actually shown to do, no matter how plain that code looks.
+
 **Validate a file's integrity locally before handing it to a tool that
 submits it directly to the model API.** Tools like `vision_analyze`
 pass binary content straight into the next model request rather than
