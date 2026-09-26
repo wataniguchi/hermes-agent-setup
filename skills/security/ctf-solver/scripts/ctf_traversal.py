@@ -256,18 +256,34 @@ def needs_scope_host(fetch_result: dict) -> bool:
 
 
 def _has_suspected_blocker(problem_id: str) -> bool:
-    """Whether this problem's own progress note records a Suspected
-    Blocker section. Advisory only — a missing or unreadable note is
-    treated as "no blocker recorded" rather than an error, since this
-    signal only ever de-prioritizes a problem in `next`'s selection
-    order, never changes its actual tracked status.
+    """Whether this problem's own progress note records something meant
+    as a Suspected Blocker. Deliberately fuzzy, not an exact match on
+    "## Suspected Blocker" -- confirmed as a real, repeated gap: real
+    notes have used "## Suspected: cipher=0x0004..." and "## What's
+    actually blocking decode right now" to record a genuine blocker in
+    every practical sense, and an exact-string check missed both,
+    silently returning the problem to full Pass 1 priority instead of
+    the fair Pass 2 rotation it should have gotten. Matches any
+    markdown heading line containing "block" or "suspect"
+    case-insensitively -- covers every real-world phrasing seen so far
+    without requiring the exact canonical wording. Advisory only -- a
+    missing or unreadable note is treated as "no blocker recorded"
+    rather than an error, since this signal only ever de-prioritizes a
+    problem in `next`'s selection order, never changes its actual
+    tracked status.
     """
     note_path = os.path.join(PROGRESS_NOTES_DIR, f"problem_{problem_id}.md")
     try:
         with open(note_path) as f:
-            return "## Suspected Blocker" in f.read()
+            content = f.read()
     except OSError:
         return False
+    for line in content.splitlines():
+        if re.match(r"^#{1,6}\s", line):
+            lowered = line.lower()
+            if "block" in lowered or "suspect" in lowered:
+                return True
+    return False
 
 
 def _progress_note_staleness_warning(problem_id: str, previous_returned_at):

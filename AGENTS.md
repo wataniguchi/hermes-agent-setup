@@ -165,6 +165,30 @@ that would apply to *any* problem needing the same underlying technique,
 not just this one, and search for that — this comes before concluding
 anything is genuinely beyond reach, not after.
 
+**Before combining two independently-fallible processing stages, prove
+each one correct in isolation, against arbitrary data and an
+authoritative external reference — not just against itself.** When a
+combined pipeline fails, a single aggregate pass/fail result cannot
+tell you which stage is actually broken, or whether the failure is in
+how the stages are connected rather than in either stage itself —
+collapsing several independently-checkable questions into one signal
+destroys the information needed to fix anything. This has happened for
+real: a decoder was verified extensively through round-trip testing —
+encoding then decoding with its own paired implementation — which
+confirmed only that the implementation agreed with itself, not that it
+matched the actual reference it needed to invert; the real mismatch (a
+data-assembly convention, not the decoding algorithm) was found only
+much later, after many failed attempts blamed on an unrelated, still-
+imperfect classification stage that had nothing to do with the actual
+bug. Test a component that can be tested alone — with synthetic input
+and a real, independent reference implementation, not a self-
+consistency check — fully before it is ever exposed to uncertain,
+real-world input from another stage. Where full component isolation
+isn't possible, use whatever partial ground truth already exists (a
+known-correct fixed header, a fixed constant, an expected structural
+marker) to isolate which stage is at fault before assuming the
+least-tested stage is the guilty one.
+
 **When a multi-stage pipeline has a downstream stage with a known,
 quantifiable tolerance for imperfect input — error correction, fuzzy
 matching, partial credit — run the whole pipeline end-to-end with your
@@ -175,7 +199,7 @@ percentage) doesn't tell you whether that stage is *good enough* — the
 actual downstream consumer does, directly and unambiguously, and is
 almost always cheaper to run than continuing to refine blind. This has
 happened for real: a session correctly computed a Reed-Solomon
-decoder's exact error tolerance (up to 37% per block) at the very
+decoder's own exact error tolerance at the very
 start of a derivation, built and rigorously verified the decoder
 itself, then treated an unrelated, indirect clustering-quality number
 as a gate to clear before ever running that decoder against real data
@@ -286,6 +310,15 @@ that is not optional scaffolding to skip when a problem feels
 difficult — it is exactly for the moment a problem feels difficult,
 and it must actually happen, as a real tool call, before any
 conclusion that something can't be solved right now.
+
+**`## Suspected Blocker` is a literal control string the traversal
+engine checks for exactly, not a section title to phrase however reads
+best — any other wording, however accurate, silently defeats the check
+and returns the problem to full priority instead of the fair rotation
+it should get.** This has caused real, silent failures more than once.
+When updating a note that already has this section — including a full
+rewrite prompted by the note-cadence warning — preserve the heading
+exactly as written, even while freely rewording everything beneath it.
 
 **When a problem's real attempt cap is genuinely exhausted — not
 bypassed, actually exhausted through five real submissions — write a

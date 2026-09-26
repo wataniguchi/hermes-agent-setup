@@ -302,6 +302,7 @@ if [[ -f "$TRAVERSAL_STATE" ]]; then
 import json
 import datetime
 import os
+import re
 
 with open('$TRAVERSAL_STATE') as f:
     state = json.load(f)
@@ -322,13 +323,23 @@ if not problems:
 PROGRESS_NOTES_DIR = '$REPO/workspace/progress-notes'
 
 def is_blocked(problem_id):
-    # Mirrors ctf_traversal.py's own _has_suspected_blocker check: a
-    # progress note exists and contains a Suspected Blocker section.
+    # Mirrors ctf_traversal.py's own _has_suspected_blocker check.
     # 'blocked' isn't a real status in the state machine (only pending/
     # in_progress/solved/exhausted/skipped_unreachable/
     # needs_manual_review are) — this is a derived, display-only
     # annotation layered on top of a genuine in_progress status, not a
     # replacement for it, so the real status stays visible/greppable.
+    #
+    # Deliberately fuzzy, not an exact match on \"## Suspected Blocker\"
+    # — confirmed as a real, repeated gap: real notes have used
+    # \"## Suspected: cipher=0x0004...\" and \"## What's actually
+    # blocking decode right now\" to record a genuine blocker, and an
+    # exact-string check missed both. This must be kept in sync with
+    # ctf_traversal.py's own _has_suspected_blocker() by hand — this is
+    # a separate, duplicated reimplementation for display purposes
+    # only, not an import of the real function, so the two can drift
+    # apart exactly the way this fuzzy-match logic itself was added to
+    # fix a prior drift.
     note_path = os.path.join(PROGRESS_NOTES_DIR, f'problem_{problem_id}.md')
     if not os.path.isfile(note_path):
         return False
@@ -337,7 +348,12 @@ def is_blocked(problem_id):
             content = f.read()
     except OSError:
         return False
-    return '## Suspected Blocker' in content
+    for line in content.splitlines():
+        if re.match(r'^#{1,6}\s', line):
+            lowered = line.lower()
+            if 'block' in lowered or 'suspect' in lowered:
+                return True
+    return False
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
