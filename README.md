@@ -8,7 +8,7 @@ Adds [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a second cl
 
 ```
 Ollama (single process, serves both models by name)
-   ├─ gpt-oss:120b-64k   (primary reasoning)
+   ├─ qwen3.8:27b-96k    (primary reasoning)
    │      ├─ open-webui   → existing browser chat + open-terminal sandbox
    │      └─ Hermes       → CLI / gateway / Discord bot, multi-agent, persistent memory
    └─ gemma4:e4b          (fast sub-agent, Hermes only, via delegation)
@@ -16,9 +16,9 @@ Ollama (single process, serves both models by name)
 
 **One Ollama instance serves both models** — unlike a per-model-process backend, there's no separate port/process per model here; requests specify which model by name, and Ollama handles loading/serving both from one endpoint (`http://localhost:11434`).
 
-**Model policy:** `gpt-oss:120b` (OpenAI, Apache 2.0) and `gemma4:e4b` (Google DeepMind) are both from US labs, chosen to avoid Chinese-origin open-weight models (Qwen, DeepSeek, Kimi, GLM) per project preference.
+**Model policy:** `qwen3.8:27b` (Alibaba) is primary; `gemma4:e4b` (Google DeepMind) remains the fast sub-agent model. This repo previously favored US-lab models over Chinese-origin ones (Qwen, DeepSeek, Kimi, GLM) as a matter of preference — `qwen3.8`, released late August, proved strong enough on real work to justify dropping that preference.
 
-**Why `gpt-oss:120b` replaced `gemma4:26b` as primary:** `gemma4:26b` showed a repeated, real pattern across extended agentic use — narrating an action ("I will now...", "scanning for...") without the corresponding tool call actually happening in the same turn, and substituting raw extracted document text for a genuine summary under task complexity. This is consistent with published reward-hacking research showing this varies significantly by model and post-training approach specifically, not primarily something temperature or other sampling settings fix. `gpt-oss:120b` is classified "agent-native" (tool-use trained as a first-class objective) in independent benchmarking, versus `gemma4:26b`'s positioning as a general-purpose, edge/laptop-tuned model — and it resolved both failure patterns cleanly in direct side-by-side testing on the same real task.
+**Why `qwen3.8:27b` is primary:** a number of models were tried before landing here. The others were dropped for one of two concrete reasons, observed directly across extended agentic use: weak reasoning specifically on CTF-style problems, or abandoning a hard challenge mid-pursuit too often rather than seeing it through. `qwen3.8:27b` held up on both counts — sustained, genuinely strong cryptanalysis and reverse-engineering work across a multi-day autonomous CTF-solving sweep, including deriving non-obvious attack paths and correctly debugging its own implementations against ground-truth references.
 
 ## Architecture at a glance
 
@@ -32,7 +32,7 @@ documentation for exactly that reason).
 ```mermaid
 flowchart TB
     subgraph MacStudio["Mac Studio (this host)"]
-        Ollama["Ollama\n(gpt-oss:120b-64k, gemma4:e4b)"]
+        Ollama["Ollama\n(qwen3.8:27b-96k, gemma4:e4b)"]
         subgraph DockerSandbox["Docker sandbox — ONE persistent container"]
             Primary["Primary agent"]
             Sub["delegate_task subagents\n(fresh conversation, SAME container)"]
@@ -106,7 +106,11 @@ authority can get what's needed), or it requires a human operator to
 rebuild the template. This is a real, current limitation, not an oversight
 to work around inside a task.
 
-**The `-64k` tag is a deliberate memory trade-off, not the model's native context.** At `gpt-oss:120b`'s native 131072 context, Ollama reserves context per parallel slot (effectively 3× at `OLLAMA_NUM_PARALLEL=3`), which left only ~9GB free system-wide on this 128GB machine — not enough headroom for `gemma4:e4b` to coexist without eviction. At 65536, the same combination left ~39GB free at rest, and was confirmed to genuinely coexist under real 3-way concurrent load (validated via `ollama ps` plus `sysctl vm.swapusage` — swap stayed near-zero throughout, not just a one-time memory snapshot).
+**`qwen3.8:27b-96k` is confirmed resident at 21GB** (`ollama ps`: `21 GB, 100% GPU, 98304 context`), with swap usage confirmed minimal at rest (`sysctl vm.swapusage`: ~63MB used of 1GB total — comfortably in the "fine" range this doc's own §5 methodology defines). **Ollama on this machine is configured to cater 1× `qwen3.8:27b-96k` plus 3× `gemma4:e4b`** resident at once, matching `OLLAMA_NUM_PARALLEL=3`/`delegation.max_concurrent_children` below.
+
+**Caveat worth knowing: this is the configured capacity, not a heavily-exercised one.** In actual use, the primary has delegated to a subagent on only one occasion so far — real multi-way concurrent delegation load hasn't been put through its paces the way this section's own validation steps describe. The numbers above reflect residency and idle swap headroom, confirmed; genuine 3-way concurrent throughput under real delegation is still mostly theoretical at this point.
+
+**Why `-96k` specifically:** a mid-ground choice, not a rigorously validated one. 64k was skipped in favor of 96k simply because the extra headroom was available; 128k was skipped in the other direction because Hermes's own context compression kicks in occasionally regardless, so the practical benefit of the larger window didn't seem to justify its added memory cost. Worth knowing as a reasonable default, not a number to treat as precisely tuned.
 
 **Version requirement:** Ollama 0.22.0 or later — earlier builds predate the `llama.cpp` Gemma 4 fixes, particularly around tool-calling reliability. `gemma4:e4b` (the fast/delegation model) still depends on this.
 
@@ -149,7 +153,7 @@ No custom LaunchAgents ship from this repo — Ollama is managed via `brew servi
 - `local-agent-webui` stack healthy, Open WebUI's backend already pointed at this same Ollama instance
 - Ollama installed via `brew install ollama`, version 0.22.0 or later — check with `ollama --version`
 - Git installed (only manual dependency for the Hermes installer)
-- Know your available headroom: 128GB total, minus whatever Docker containers (Open WebUI, Open Terminal) already reserve — `gpt-oss:120b-64k` runs ~64GB resident, `gemma4:e4b` a few GB. This is meaningfully tighter than a smaller primary would be: confirmed ~39GB free at rest with both loaded, ~15GB free under real 3-way concurrent delegation load. Comfortable, but worth monitoring (`sysctl vm.swapusage`) rather than assuming it scales further — see §5.
+- Know your available headroom: 128GB total, minus whatever Docker containers (Open WebUI, Open Terminal) already reserve. `qwen3.8:27b-96k` runs ~21GB resident; Ollama on this machine is configured to cater that plus 3× concurrent `gemma4:e4b` instances (confirmed resident/idle, not yet exercised under real concurrent delegation load) — see §5.
 
 ### 2. Install Hermes Agent
 
@@ -169,14 +173,14 @@ CLI-only install is what the rest of this guide assumes. If you'd rather use the
 ./scripts/setup-ollama-models.sh
 ```
 
-Pulls `gpt-oss:120b` (primary) and `gemma4:e4b` (fast sub-agent), checks your installed Ollama version against the 0.22.0+ requirement, and creates the `gpt-oss:120b-64k` tag used by `config.yaml` — a 65536-context variant of the primary, not its native 131072. This is a deliberate memory trade-off (see the overview above), not a mistake — don't "fix" it by pointing `config.yaml` at plain `gpt-oss:120b` without re-validating the concurrent-load memory numbers first.
+Pulls `qwen3.8:27b` (primary) and `gemma4:e4b` (fast sub-agent), checks your installed Ollama version against the 0.22.0+ requirement, and creates the `qwen3.8:27b-96k` tag used by `config.yaml` (see the overview above for why 96k specifically).
 
 If you ever need to recreate the tag manually:
 
 ```
-ollama run gpt-oss:120b
->>> /set parameter num_ctx 65536
->>> /save gpt-oss:120b-64k
+ollama run qwen3.8:27b
+>>> /set parameter num_ctx 98304
+>>> /save qwen3.8:27b-96k
 >>> /bye
 ```
 
@@ -199,15 +203,15 @@ See §11 for what this image includes and why it exists.
 
 ### 5. Residency and concurrency
 
-Since one Ollama instance serves both models, three settings matter for keeping both resident, letting delegation's concurrent subagents actually run in parallel rather than queue, and preventing an idle-timeout unload from silently evicting the 64GB primary between uses:
+Since one Ollama instance serves both models, three settings matter for keeping both resident, letting delegation's concurrent subagents actually run in parallel rather than queue, and preventing an idle-timeout unload from silently evicting the primary between uses:
 
 ```
-OLLAMA_MAX_LOADED_MODELS=2   # keep both gpt-oss:120b-64k and gemma4:e4b resident at once
+OLLAMA_MAX_LOADED_MODELS=2   # keep both qwen3.8:27b-96k and gemma4:e4b resident at once
 OLLAMA_NUM_PARALLEL=3        # match delegation.max_concurrent_children — otherwise Ollama queues the excess
-OLLAMA_KEEP_ALIVE=24h        # don't let the 64GB primary idle-unload between uses (default is 5 minutes)
+OLLAMA_KEEP_ALIVE=24h        # don't let the primary idle-unload between uses (default is 5 minutes)
 ```
 
-`OLLAMA_KEEP_ALIVE` matters much more here than it would with a small primary — reloading a 64GB model costs real time, and Ollama's 5-minute default idle timeout is easy to hit during normal gaps between primary reasoning and subagent work. Set generously (`24h` here) rather than just past the shortest expected gap — a long-running Phase, or being away from the machine for a stretch, should not trigger a reload.
+`OLLAMA_KEEP_ALIVE` still matters here even with a smaller, 21GB-class primary — Ollama's 5-minute default idle timeout is easy to hit during normal gaps between primary reasoning and subagent work, and reloading costs real time regardless of model size. Set generously (`24h` here) rather than just past the shortest expected gap — a long-running task, or being away from the machine for a stretch, should not trigger a reload.
 
 Ollama runs as a `brew services` background daemon, launched by `launchd`, not your shell — these variables need to go in the brew-managed plist's `EnvironmentVariables` block, not `~/.zshrc`.
 
@@ -249,7 +253,7 @@ If `bootstrap` fails with a generic `Input/output error`, this can mean either t
 **Verify coexistence properly — memory totals alone can be misleading.** Set an explicit keep-alive on both models directly (removes any doubt about whether the env var is actually live) and check residency immediately, back-to-back:
 
 ```
-ollama run gpt-oss:120b-64k --keepalive 30m "reply with just the word ok"
+ollama run qwen3.8:27b-96k --keepalive 30m "reply with just the word ok"
 ollama run gemma4:e4b --keepalive 30m "reply with just the word ok"
 ollama ps
 ```
@@ -443,14 +447,14 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 | Discord bot online and connected, but never replies to messages                                                                           | `discord.require_mention: true` is the default — plain messages without an @mention are silently ignored, by design                                                                                      | @mention the bot explicitly, or set `discord.free_response_channels` for a channel where you don't want to                                                                                  |
 | Ollama not responding, or one model evicting the other                                                                                    | `OLLAMA_MAX_LOADED_MODELS` not set or too low, or genuine memory pressure with a 64GB primary loaded                                                                                                     | Set to 2 in the brew-managed plist (§5); confirm via `sysctl vm.swapusage`, not just `top`, whether it's a real capacity issue or just a config gap                                         |
 | Subagents run one after another instead of in parallel                                                                                    | `OLLAMA_NUM_PARALLEL` too low for `delegation.max_concurrent_children`                                                                                                                                   | Raise `OLLAMA_NUM_PARALLEL` in the brew plist (§5) to match; verify with `ollama ps` under load                                                                                             |
-| Primary model (`gpt-oss:120b-64k`) missing from `ollama ps` shortly after being used, GPU otherwise idle                                  | Idle-timeout unload — default `OLLAMA_KEEP_ALIVE` is 5 minutes, easy to hit with gaps between primary reasoning and subagent work                                                                        | Set `OLLAMA_KEEP_ALIVE=24h` (or longer) in the brew plist (§5); re-verify with explicit `--keepalive` on both models if still unsure                                                        |
+| Primary model (`qwen3.8:27b-96k`) missing from `ollama ps` shortly after being used, GPU otherwise idle                                   | Idle-timeout unload — default `OLLAMA_KEEP_ALIVE` is 5 minutes, easy to hit with gaps between primary reasoning and subagent work                                                                        | Set `OLLAMA_KEEP_ALIVE=24h` (or longer) in the brew plist (§5); re-verify with explicit `--keepalive` on both models if still unsure                                                        |
 | `launchctl bootstrap` on the Ollama plist fails with generic `Input/output error`                                                         | Either already loaded (harmless), or a genuine orphaned `ollama serve` process outside launchd's tracking is holding port 11434                                                                          | `ps aux \| grep "ollama serve"` — should show exactly one process; `kill` any extras, confirm `lsof -i :11434` is clear, then re-`bootstrap`                                                 |
 | Gateway doesn't survive reboot                                                                                                            | LaunchAgent not loaded, or Ollama not ready at login                                                                                                                                                     | Confirm `hermes gateway status` shows it supervised; confirm `brew services list` shows Ollama running                                                                                      |
 | Subagents use the primary model instead of the fast one                                                                                   | `delegation:` isn't copied to `~/.hermes/config.yaml`                                                                                                                                                    | Confirm the block is present in `~/.hermes/config.yaml`                                                                                                                                     |
 | Subagent reports a source document path doesn't exist, but it's clearly on the host                                                       | Tried to unify scattered directories with symlinks before mounting — Docker bind-mounts don't follow a symlink to a target outside the mounted directory                                                 | Mount each real source directory individually in `terminal.docker_volumes` (§11), not a directory of symlinks pointing elsewhere                                                            |
 | `pip install` fails inside the sandbox, or PDF extraction says pypdf/pdfplumber isn't installed, despite having installed it before       | An existing container is still running from the old stock image (from before switching to `hermes-sandbox:latest`), or `docker/hermes-sandbox.Dockerfile` was never built                                | Run `./scripts/build-sandbox-image.sh`, then `docker rm -f` any existing `hermes-` containers so the next request creates a fresh one from the new image (§11)                              |
 | Sandboxed path request in Hermes Desktop reports "not found," but the same request via `hermes chat` or Discord works fine                | Desktop doesn't reliably apply `terminal.backend: docker` — falls back to running on the host with no error shown (§10)                                                                                  | Use `hermes chat` or the Discord gateway for anything needing the Docker sandbox, until this is fixed upstream                                                                              |
-| Primary agent goes silent / no GPU activity right after announcing a tool call or delegation, or degenerates into repeated garbage tokens | Confirmed, with `gemma4:26b` as primary, on two different MLX-based servers (`mlx_lm.server`, `mlx_vlm.server`); not reproduced on Ollama, and not reproduced with `gpt-oss:120b-64k` as primary under the same real workload | If this recurs, capture the exact prompt/conditions and treat as a new report — this specific pattern was tied to the old primary/backend combination, not something expected to carry over |
+| Primary agent goes silent / no GPU activity right after announcing a tool call or delegation, or degenerates into repeated garbage tokens | Confirmed, with `gemma4:26b` as primary, on two different MLX-based servers (`mlx_lm.server`, `mlx_vlm.server`); not reproduced on Ollama with `gpt-oss:120b-64k` as primary. Not specifically re-tested since switching to `qwen3.8:27b-96k` — no reports of it so far. | If this recurs, capture the exact prompt/conditions and treat as a new report — this specific pattern was tied to the old primary/backend combination, not something expected to carry over |
 
 For issues specific to the Proxmox Windows analysis lab (§12), see
 [README_Proxmox.md](README_Proxmox.md)'s own troubleshooting table instead.

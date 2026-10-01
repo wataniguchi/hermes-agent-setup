@@ -30,7 +30,7 @@ echo "== Hermes Agent setup verification (Ollama backend) =="
 echo
 
 check "Ollama reachable"                            "curl -sf http://localhost:11434/api/tags"
-check "gpt-oss:120b-64k created"                     "ollama list | awk '{print \$1}' | grep -qx 'gpt-oss:120b-64k'"
+check "qwen3.8:27b-96k created"                      "ollama list | awk '{print \$1}' | grep -qx 'qwen3.8:27b-96k'"
 check "gemma4:e4b pulled"                            "ollama list | awk '{print \$1}' | grep -qx 'gemma4:e4b'"
 check "Hermes CLI installed"                         "command -v hermes"
 check "Hermes config file present"                   "test -f ~/.hermes/config.yaml"
@@ -54,7 +54,7 @@ fi
 
 echo "== Tool-calling sanity check (primary model) =="
 TOOL_TEST=$(curl -s http://localhost:11434/api/chat \
-  -d '{"model":"gpt-oss:120b-64k","messages":[{"role":"user","content":"Use get_weather to check Yokohama."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"stream":false}' 2>/dev/null)
+  -d '{"model":"qwen3.8:27b-96k","messages":[{"role":"user","content":"Use get_weather to check Yokohama."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"stream":false}' 2>/dev/null)
 if echo "$TOOL_TEST" | grep -q '"tool_calls"'; then
   echo "Tool-calling: OK (valid tool_calls returned)"
   pass=$((pass+1))
