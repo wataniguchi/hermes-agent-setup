@@ -86,6 +86,51 @@ SESSION_ID_FILE="$WORKSPACE_DIR/.ctf-sweep-current-session-id"
 # instead — slower, but honest, since it can't miss what an index would.
 SESSION_EXPORTS_DIR="$WORKSPACE_DIR/session-exports"
 SESSION_EXPORTS_INDEX="$SESSION_EXPORTS_DIR/index.txt"
+PROGRESS_NOTES_DIR="$WORKSPACE_DIR/progress-notes"
+TRAVERSAL_STATE_FILE="$WORKSPACE_STATE_FILE"
+
+# Watchdog-side note distillation: this is the one mechanism in the whole
+# project that does not depend on the agent choosing to write a note.
+# Every other fix built so far -- the cadence reminder, the submit gate,
+# the fuzzy-match blocker heading -- is advisory or triggered by the
+# agent's own next/status/submit calls, and every one of them has a
+# confirmed real gap: a session that never calls into ctf_traversal.py at
+# all, or ends via a prose-only turn with no trailing tool call, is
+# unreachable by any of them. This runs unconditionally after every
+# session ends (normal exit, crash, or interrupt), using whatever
+# transcript was just archived, regardless of what the agent itself did
+# or didn't write down.
+#
+# Deliberately NOT trusted at face value even though gpt-oss:120b-96k
+# was chosen specifically for document-processing trustworthiness over
+# raw CTF-solving skill: a distilled summary is still a self-report, and
+# a *different*, cheaper model already in this project's own delegation
+# role (gemma4:e4b) has been caught fabricating a result once already
+# (session 8bc6a9, a delegated subagent task) -- the general risk that
+# any model asked to "report on what happened" can produce a plausible,
+# unverified claim rather than an accurate one. The distillation
+# prompt requires citing concrete evidence (file paths, quoted output)
+# for every claim, and any path it cites that doesn't actually exist on
+# disk is treated as a fabrication signal strong enough to discard the
+# whole distillation rather than append it. What does get appended is
+# labeled machine-generated and kept out of the agent's own "## Proven"
+# section, so nothing here is ever mistaken for something a session
+# actually verified itself.
+DISTILL_ENABLED=1
+DISTILL_MODEL="gpt-oss:120b-96k"
+DISTILL_OLLAMA_URL="http://localhost:11434/api/generate"
+DISTILL_TRANSCRIPT_TAIL_CHARS=16000
+# Generous on purpose: ollama ps shows qwen3.8:27b-96k (21 GB) resident
+# whenever the sweep is actually running, and gpt-oss:120b-96k is a much
+# larger model that was very likely not resident at all at the moment a
+# session just ended. The 120s a shorter timeout might assume could be
+# consumed entirely by Ollama unloading qwen and loading gpt-oss fresh
+# from disk, before a single token of actual distillation happens. This
+# only costs wall-clock time once per session end, delaying the next
+# sweep attempt -- not a cost paid during live CTF work -- so erring
+# long here is cheap; erring short risks discarding real distillation
+# work to a timeout that was never about the model being slow to think.
+DISTILL_TIMEOUT_SECONDS=600
 
 PROFILE="gemma-experiment"
 MODE=""   # "" = auto-detect on attempt #1; "init" or "resume" = forced every attempt
@@ -114,6 +159,10 @@ Usage: $0 [-p|--profile <name>] [--init|--resume] [--no-monitor]
                           own terminal, or don't want the periodic
                           session-export activity at all.
 
+  --no-distill            Don't run watchdog-side note distillation after
+                          each session ends. Use this to disable the
+                          feature entirely without editing the script.
+
   With neither --init nor --resume given: attempt #1 auto-detects by
   checking whether
   $WORKSPACE_STATE_FILE
@@ -135,6 +184,7 @@ while [[ $# -gt 0 ]]; do
         --init) MODE="init"; shift ;;
         --resume) MODE="resume"; shift ;;
         --no-monitor) START_MONITOR=0; shift ;;
+        --no-distill) DISTILL_ENABLED=0; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -206,6 +256,43 @@ archive_session_transcript() {
     fi
 }
 
+# Watchdog-side note distillation — see the long comment near
+# DISTILL_ENABLED above for the full rationale. Runs unconditionally
+# after archive_session_transcript, on both the normal exit path and the
+# interrupted/crashed path (cleanup() below calls this too), since a
+# crash or a prose-only ending is exactly the case nothing else in the
+# project can reach. Never allowed to block the sweep: any failure here
+# (model unreachable, timeout, fabricated evidence) is logged and the
+# function returns normally either way.
+distill_progress_note() {
+    local sid="${1:-}"
+    local label="${2:-current attempt}"
+    if [[ "$DISTILL_ENABLED" -ne 1 ]]; then
+        return
+    fi
+    if [[ -z "$sid" ]]; then
+        echo "distill: no session id known for $label — skipping." | tee -a "$OUTPUT_LOG"
+        return
+    fi
+    if [[ ! -f "$SESSION_EXPORTS_DIR/$sid.md" ]]; then
+        echo "distill: no archived transcript for $label (session $sid) — skipping." | tee -a "$OUTPUT_LOG"
+        return
+    fi
+    echo "distill: running note distillation for $label (session $sid)..." | tee -a "$OUTPUT_LOG"
+    python3 "$SCRIPT_DIR/distill_progress_note.py" \
+        "$sid" "$WORKSPACE_DIR" "$DISTILL_MODEL" "$DISTILL_OLLAMA_URL" \
+        "$DISTILL_TIMEOUT_SECONDS" "$DISTILL_TRANSCRIPT_TAIL_CHARS" \
+        >> "$OUTPUT_LOG" 2>&1
+    local distill_rc=$?
+    if [[ $distill_rc -eq 0 ]]; then
+        echo "distill: note updated for $label." | tee -a "$OUTPUT_LOG"
+    elif [[ $distill_rc -eq 2 ]]; then
+        echo "distill: WARNING — discarded for $label due to a failed evidence check (see $OUTPUT_LOG for which path). This is the fabrication-detection path working as intended, not a bug." | tee -a "$OUTPUT_LOG"
+    else
+        echo "distill: skipped for $label (ordinary reason — see $OUTPUT_LOG). Sweep continues regardless." | tee -a "$OUTPUT_LOG"
+    fi
+}
+
 # Clean up on any exit path — Ctrl-C, an error exit further down, or
 # normal completion (this loop never completes normally today, but the
 # trap covers it regardless).
@@ -238,6 +325,7 @@ cleanup() {
         # half-updated state; a dead one is a clean, final snapshot.
         wait "$hermes_pid" 2>/dev/null
         archive_session_transcript "${session_id:-}" "interrupted attempt #${attempt:-?}"
+        distill_progress_note "${session_id:-}" "interrupted attempt #${attempt:-?}"
     fi
     if [[ -n "${MONITOR_PID:-}" ]]; then
         echo "Stopping monitor (pid $MONITOR_PID)..."
@@ -397,6 +485,7 @@ while true; do
     # Archive this attempt's full transcript — see
     # archive_session_transcript above for why this is unconditional.
     archive_session_transcript "${session_id:-}" "attempt #$attempt"
+    distill_progress_note "${session_id:-}" "attempt #$attempt"
 
     if [ -d "$LOG_DIR" ]; then
         echo "--- Last 5 agent.log lines: ---" | tee -a "$OUTPUT_LOG"
