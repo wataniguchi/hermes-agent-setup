@@ -9,6 +9,19 @@
 # and cleaned up. Can also be run standalone, with --session-id, for
 # manual monitoring without the watchdog.
 #
+# GENERALIZED (patched for range-assess): this script originally
+# hardcoded its own session-id file
+# (workspace/.ctf-sweep-current-session-id), which meant only the
+# ksnctf sweep's watchdog could ever use it. The only thing that was
+# ever ksnctf-specific about it is that one path, so it's now a
+# --session-id-file <path> flag instead, defaulting to the exact same
+# hardcoded path as before — any existing invocation (including from
+# ctf-sweep-watchdog.sh, unmodified) behaves identically to the
+# pre-patch version. scripts/range-sweep-watchdog.sh now launches this
+# same script with --session-id-file pointed at its own
+# workspace/.range-sweep-current-session-id, rather than forking a
+# near-duplicate copy.
+#
 # HOW SESSION IDENTIFICATION WORKS, AND WHY IT CHANGED:
 # Two earlier versions of this script tried to guess the current
 # session from `sessions list` alone — first by blind recency (broken:
@@ -21,11 +34,11 @@
 # fed into each attempt, because it constructed that text itself. This
 # script no longer identifies its own session — it reads the ID the
 # watchdog already identified using that exact knowledge, written to
-# workspace/.ctf-sweep-current-session-id after each attempt launches
-# (see ctf-sweep-watchdog.sh's discover_session_id, which matches on an
-# exact substring of that attempt's own prompt plus a short recency
-# window, via `sessions export --dry-run`'s structured output — not
-# `sessions list`'s human-formatted table).
+# its own session-id file after each attempt launches (see each
+# watchdog's own discover_session_id, which matches on an exact
+# substring of that attempt's own prompt plus a short recency window,
+# via `sessions export --dry-run`'s structured output — not `sessions
+# list`'s human-formatted table).
 #
 # See CTF_GENERALIZATION_DESIGN.md, "Operational resilience" for why
 # this exists at all: `-z`'s quiet-stdout design also quiets
@@ -36,11 +49,17 @@
 #
 # Usage:
 #   chmod +x scripts/ctf-sweep-monitor.sh
-#   ./scripts/ctf-sweep-monitor.sh [-p|--profile <name>] [-n|--interval SECONDS] [-c|--chars N] [--session-id ID]
+#   ./scripts/ctf-sweep-monitor.sh [-p|--profile <name>] [-n|--interval SECONDS] [-c|--chars N] [--session-id ID] [--session-id-file PATH]
 #
-# --session-id overrides the shared file entirely — use this for
-# standalone monitoring of a specific session without the watchdog
+# --session-id overrides the session-id file entirely — use this for
+# standalone monitoring of a specific session without any watchdog
 # running at all.
+#
+# --session-id-file points this script at a different watchdog's
+# shared file (e.g. a range-assess sweep's
+# workspace/.range-sweep-current-session-id instead of the ksnctf
+# sweep's own workspace/.ctf-sweep-current-session-id). Defaults to the
+# ksnctf path, unchanged from before this flag existed.
 #
 # NOTE ON PRIVACY: exported content is passed through --redact, which
 # catches recognized credential patterns but NOT flag values themselves
@@ -68,9 +87,10 @@ while [[ $# -gt 0 ]]; do
         -n|--interval) INTERVAL="${2:-}"; shift 2 ;;
         -c|--chars) TAIL_CHARS="${2:-}"; shift 2 ;;
         --session-id) SESSION_ID_OVERRIDE="${2:-}"; shift 2 ;;
+        --session-id-file) SESSION_ID_FILE="${2:-}"; shift 2 ;;
         --once) ONCE=1; shift ;;   # internal: used by the `watch` re-invocation below
         -h|--help)
-            echo "Usage: $0 [-p|--profile <name>] [-n|--interval SECONDS] [-c|--chars N] [--session-id ID]"
+            echo "Usage: $0 [-p|--profile <name>] [-n|--interval SECONDS] [-c|--chars N] [--session-id ID] [--session-id-file PATH]"
             exit 0
             ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
@@ -140,7 +160,7 @@ fi
 # their own terminal); always use the plain loop otherwise, regardless
 # of whether `watch` happens to be installed.
 if [[ -t 0 ]] && command -v watch >/dev/null 2>&1; then
-    exec watch -n "$INTERVAL" "$0" -p "$PROFILE" -n "$INTERVAL" -c "$TAIL_CHARS" --session-id "$SESSION_ID_OVERRIDE" --once
+    exec watch -n "$INTERVAL" "$0" -p "$PROFILE" -n "$INTERVAL" -c "$TAIL_CHARS" --session-id "$SESSION_ID_OVERRIDE" --session-id-file "$SESSION_ID_FILE" --once
 fi
 
 # Fallback for machines without `watch` installed (not preinstalled on

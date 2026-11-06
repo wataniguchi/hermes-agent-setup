@@ -1,0 +1,21 @@
+{
+  "_schema": {
+    "range_name": "a short identifier for this range (free text, used only in logs/README context, not by any script)",
+    "note": "free-text note shown nowhere automatically — operators use this field for standing reminders about the range as a whole (e.g. naming/safety conventions). Scripts don't read it.",
+    "hosts": "a map of golden_vmid (string) -> host record. golden_vmid is the Proxmox VMID of the existing, protected golden image — never a working clone's own VMID.",
+    "host record fields": {
+      "host": "hostname, without the '-golden'/'-ctf' suffix — scripts/prompts build '<host>-golden' and '<host>-ctf' from this",
+      "os": "'Linux' or 'Windows' — informational only; no script branches on this field today",
+      "ipv4": "the golden image's own address, for reference only — real scans/PoC/remediation always target the WORKING clone's address (passed separately via --target at runtime), never this field",
+      "ipv6": "optional; same caveat as ipv4",
+      "note": "optional free-text per-host note (e.g. a safety/isolation confirmation like the one this project used for a simulated-RTU-named host) — not read by any script, for human operators only"
+    },
+    "REMEMBER": "this file is committed to a public repo as a TEMPLATE only. Keep your real, filled-in range inventory in a separate, untracked file (e.g. hosts.local.json, or this same filename added to .gitignore in your own private deployment) and pass it explicitly via --config — never commit real VMIDs/addresses for a non-public range."
+  },
+  "range_name": "example-range",
+  "note": "Golden images (VMID as listed below) are never scanned, modified, or exploited directly. Every assessment run clones <host>-golden to a working image named <host>-ctf before touching it, and that working VM is destroyed at the end of the run.",
+  "hosts": {
+    "9001": {"host": "example-linux-host", "os": "Linux", "ipv4": "203.0.113.10", "ipv6": "2001:db8::10"},
+    "9002": {"host": "example-windows-host", "os": "Windows", "ipv4": "203.0.113.20", "ipv6": "2001:db8::20", "note": "example of the optional per-host note field — e.g. an operator confirmation that this host is simulated/isolated, if that ever matters for a real entry"}
+  }
+}

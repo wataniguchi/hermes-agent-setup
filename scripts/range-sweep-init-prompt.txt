@@ -1,0 +1,172 @@
+Start a fresh, fully autonomous range-assessment sweep using the
+range-assess skill against your range (host inventory at
+/root/.hermes/skills/security/range-assess/config/hosts.json — your own
+real, filled-in copy, not the sanitized template this skill ships
+with). Workspace and history have been cleared — this is a genuinely
+clean start, zero hosts assessed yet.
+
+Division of labor, stated once so it's never ambiguous mid-loop: NO
+script in this skill ever calls a model. range_traversal.py only tracks
+state and tells you what to do next. range_poc.py/range_remediate.py's
+`assign` subcommands only hand YOU a filled task prompt — YOU do the
+real exploitation/remediation work yourself, using YOUR OWN tools: real
+network access for a network-scope finding, real calls to
+proxmox_bridge.py's guest-exec endpoint (the same channel the audit
+step used) for a local-scope one. Their `report` subcommands only
+validate and log the result you hand back after actually doing that
+work. There is no hidden second model call anywhere in this loop — you
+are the one doing the PoC and the remediation, every time.
+
+STEP 1 — initialize:
+
+    python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py init --config /root/.hermes/skills/security/range-assess/config/hosts.json
+
+Expect every host in your hosts.json seeded, all network_scan_status
+"not_started" and local_audit_status "not_started".
+
+STEP 2 — the loop. Do this repeatedly:
+
+1. python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py next
+   Read the returned "action" field and do exactly that, then come back
+   to this step.
+
+2. If action is "clone_and_scan":
+   a. Clone the golden image to a working image via proxmox_bridge.py
+      (POST /vm/clone with the golden vmid as template_vmid, a new_vmid
+      you choose, and name "<host>-ctf"), then start it
+      (POST /vm/<new_vmid>/start).
+   b. CLONING IS SLOW — a Proxmox clone can genuinely take 30-60+
+      minutes. This is normal, not a hang. Do not tight-loop polling
+      it; check back at a sane interval, and do not conclude anything
+      is broken just because the clone isn't done yet.
+   b2. ALWAYS issue the /vm/clone and /vm/<vmid>/start calls as a
+      BACKGROUND command from the very first attempt — never foreground
+      first and "fall back to background only if it times out." Here's
+      why this matters, confirmed from a real run: /vm/clone's own HTTP
+      response doesn't come back until Proxmox actually finishes — it
+      blocks for the clone's full real duration. A foreground command's
+      own execution-timeout is very likely SHORTER than that. If it
+      fires, your own tool call dies, but the clone request you already
+      sent to Proxmox keeps running completely unaffected on the bridge
+      side — your client giving up tells you NOTHING about whether the
+      clone itself is failing or quietly succeeding.
+      CONSEQUENCE IF YOU GET THIS WRONG, seen for real: a foreground
+      call times out -> you retry with the same new_vmid -> Proxmox
+      rejects the retry ("config file already exists") because the
+      FIRST call is still genuinely cloning that vmid -> you read that
+      rejection as "stale leftover, must be from a dead prior session"
+      -> you DELETE that vmid -> that was your own first call's clone,
+      which was about to succeed -> you've now destroyed real, working
+      progress and have to clone a third time from scratch. This is
+      entirely avoidable: background from the start, and poll/wait on
+      that ONE background call instead of ever sending a second
+      request for the same vmid.
+   b3. If a /vm/clone or /vm/<vmid>/start call ever DOES come back
+      failed, timed out, or ambiguous for any other reason: do NOT
+      assume the VM wasn't created and do NOT jump straight to deleting
+      the vmid. First check whether it actually exists and is further
+      along than the error suggests — e.g. try /vm/<vmid>/start (a
+      vmid that doesn't exist yet will fail differently than one that's
+      mid-clone or already running), or just wait another minute and
+      retry the SAME check rather than a mutating call. Only delete a
+      vmid once you've confirmed it's genuinely not what you need —
+      "an error came back" is not that confirmation by itself.
+   c. Once the working VM is up and has an address, scan it over the
+      network:
+      python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py record-scan --vmid <golden_vmid> --working-vmid <new_vmid> --target <working VM's own ip> --discover /root/.hermes/skills/security/range-assess/scripts/range_discover.py
+
+3. If action is "local_audit":
+   python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <working_vmid> --audit /root/.hermes/skills/security/range-assess/scripts/range_host_audit.py
+   This runs read-only enumeration commands inside the guest via
+   proxmox_bridge.py's guest-exec channel (root/SYSTEM-privileged, by
+   design — see range_host_audit.py's own docstring for why that's
+   expected, not a problem). A per-check failure (e.g. an RPM query on
+   a Debian host) is normal and shows up in the result's "errors"
+   list — it doesn't mean the whole audit failed.
+
+4. If action is "assign_poc" or "assign_reverify":
+   a. Get the task prompt:
+      python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py assign-poc --vmid <golden_vmid> --finding <finding_id> --poc-script /root/.hermes/skills/security/range-assess/scripts/range_poc.py [--reverify if action was assign_reverify]
+   b. Read the returned "prompt" field. It tells you the exact scope
+      (one specific target/port for a network finding, or one specific
+      local condition with its audit evidence for a local finding) and
+      what to do. DO THE REAL WORK YOURSELF, right now, using your own
+      tools — this is not something any script does for you, and
+      nothing happens automatically just because you called `assign`.
+   c. Write your own result as JSON (the prompt tells you the exact
+      shape) to a file of your choosing, then report it:
+      python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py report-poc --vmid <golden_vmid> --finding <finding_id> --poc-script /root/.hermes/skills/security/range-assess/scripts/range_poc.py --result-file <path> [--reverify if this was a reverify]
+   d. A model_call_failed-style refusal doesn't apply here (there's no
+      model call to fail) — but a guardrail refusal (cap reached, too
+      soon since the last attempt, golden/working mismatch) does. Read
+      the "reason" field if `report` refuses; it tells you exactly why.
+
+5. If action is "assign_remediate":
+   Same assign -> do the real work -> report shape as step 4, using
+   range_remediate.py instead of range_poc.py:
+      python3 .../range_traversal.py assign-remediate --vmid <golden_vmid> --finding <finding_id> --remediate-script /root/.hermes/skills/security/range-assess/scripts/range_remediate.py
+   Apply the fix yourself (a config/package change over your own
+   session access for a network-scope finding; a proxmox_bridge.py
+   guest-exec call for a local-scope one), write your result JSON, then:
+      python3 .../range_traversal.py report-remediate --vmid <golden_vmid> --finding <finding_id> --remediate-script /root/.hermes/skills/security/range-assess/scripts/range_remediate.py --result-file <path>
+
+6. If action is "review_needed": the remediation did not close the
+   finding (status "reverify_failed"). Do not immediately re-run the
+   identical remediation — first call `status` and read the finding's
+   existing remediation_summary and evidence/method so the next
+   assign-remediate call is actually informed by what didn't work, not
+   a repeat of the same proposal. If you're genuinely unsure what to
+   try differently, say so in the final summary rather than guessing.
+
+7. Once every finding on a host reaches a terminal status
+   (poc_not_reachable, poc_inconclusive, reverified_closed, or
+   review_needed left for the operator), destroy that host's working
+   image via proxmox_bridge.py (POST /vm/<working_vmid>/stop, then
+   DELETE /vm/<working_vmid>) before moving on.
+
+8. Go back to step 1.
+
+Never edit /workspace/.range_traversal_state.json,
+/workspace/.range_poc_log.json, or /workspace/.range_remediate_log.json
+directly — not via execute_code, write_file, terminal, or any means
+other than range_traversal.py's own commands. You have no authority to
+force a finding's status or bypass an attempt cap yourself, no matter
+how confident the judgment feels — identical standing rule to the
+ksnctf sweep's own, for the identical reason.
+
+Never pass a golden VMID as --working-vmid to any script, and never
+act against any address or VM other than the specific working clone's
+own, for the finding at hand — every script in this skill hard-refuses
+the golden/working mismatch on purpose; treat a refusal as a signal to
+check your own arguments, not something to work around.
+
+DO NOT STOP. Treat stopping to summarize progress as a failure mode as
+serious as skipping a finding. Keep working the loop continuously, host
+after host, finding after finding, without pausing to report,
+summarize, or check in — including during a long clone wait, where the
+right move is to come back and check again, not to narrate that you're
+waiting. There are only three legitimate reasons to stop:
+
+1. The traversal reports "done": true — every host scanned (both
+   phases) and every finding resolved to a terminal status. Stop and
+   give the final summary.
+2. You are certain you are running low on context or response budget
+   right now, in this exact moment — not "I've done a few hosts so
+   here's an update."
+3. Something is genuinely broken in a way no tool or technique can work
+   around (report exactly what and why — e.g. proxmox_bridge.py itself
+   unreachable, not just one slow clone or one expected per-check audit
+   failure).
+
+Nothing else justifies pausing. If you find yourself about to write a
+sentence like "here's my progress so far" or "I am continuing the
+loop," that is the signal to NOT send that message and instead take
+the next concrete action immediately.
+
+Context resets are safe if truly needed — /new, then
+`range_traversal.py status` to resume exactly where you left off. All
+traversal state is file-backed and survives a reset.
+
+Only when genuinely done (or blocked, or out of budget): report full
+progress and give a complete summary, including every finding left in
+"review_needed" for the operator's own attention.

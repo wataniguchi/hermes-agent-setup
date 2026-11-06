@@ -26,7 +26,7 @@ import os
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
 import urllib3
@@ -39,22 +39,33 @@ PVE_HOST = os.environ["PVE_HOST"].rstrip("/")
 PVE_NODE = os.environ["PVE_NODE"]
 PVE_TOKEN_ID = os.environ["PVE_TOKEN_ID"]
 PVE_TOKEN_SECRET = os.environ["PVE_TOKEN_SECRET"]
-# The golden template — never a valid target for start/stop/exec/file
-# operations from a client. Only /vm/clone may ever reference it, and only
+# The golden template(s) — never a valid target for start/stop/exec/file
+# operations from a client. Only /vm/clone may ever reference one, and only
 # as the SOURCE of a clone. Confirmed necessary: an agent attempted direct
 # exec calls against this vmid in practice. Protecting it here, in the
 # bridge itself, means this holds regardless of what any client — correct,
 # confused, or malicious — asks for; it does not depend on any model
 # remembering a rule stated in a prompt or skill doc.
+#
+# PVE_GOLDEN_VMIDS generalizes the original single-template guard to a set,
+# for setups (e.g. a multi-host range) with more than one golden image to
+# protect. Comma-separated, e.g. "101,102,201,202". If unset, falls back
+# to the original singular PVE_TEMPLATE_VMID env var (default 9000) alone,
+# so an existing single-template deployment's env needs no change.
+_golden_vmids_env = os.environ.get("PVE_GOLDEN_VMIDS")
 PVE_TEMPLATE_VMID = int(os.environ.get("PVE_TEMPLATE_VMID", "9000"))
+if _golden_vmids_env:
+    PVE_GOLDEN_VMIDS = {int(v.strip()) for v in _golden_vmids_env.split(",") if v.strip()}
+else:
+    PVE_GOLDEN_VMIDS = {PVE_TEMPLATE_VMID}
 
 
 def guard_not_template(vmid: int) -> None:
-    if vmid == PVE_TEMPLATE_VMID:
+    if vmid in PVE_GOLDEN_VMIDS:
         raise HTTPException(
             status_code=403,
             detail=(
-                f"vmid {vmid} is the golden template — it is never a valid "
+                f"vmid {vmid} is a golden image — it is never a valid "
                 "target for this operation. Only /vm/clone may reference it, "
                 "as the clone source. Use the vmid returned by a prior "
                 "/vm/clone call instead."
@@ -69,6 +80,22 @@ VERIFY_TLS = False
 app = FastAPI(title="Proxmox-Hermes bridge")
 
 
+def _log_timestamp() -> str:
+    # Local wall-clock time (whatever timezone this process's host is set
+    # to — the Mac Studio this runs on, per this file's own module
+    # docstring), not UTC. The original version always printed "...Z"
+    # (UTC) regardless of where you actually are, which meant cross-
+    # referencing this log against anything else you're looking at (your
+    # own shell's `date`, a watchdog's own timestamped lines, your own
+    # memory of "I did X around 9pm") required mentally offsetting every
+    # single line by your UTC offset — tedious and easy to get wrong.
+    # datetime.now() with no tz arg is naive-local; .astimezone() attaches
+    # the system's actual local tz (and its DST state, if any) without
+    # needing to hardcode or guess what that offset is.
+    now = datetime.now().astimezone()
+    return now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + now.strftime("%z")
+
+
 @app.middleware("http")
 async def log_with_timestamp(request, call_next):
     # Logging only on completion (the original version of this) is silent
@@ -78,15 +105,13 @@ async def log_with_timestamp(request, call_next):
     # stuck" is the question that matters most. Log on both start and
     # finish instead.
     start = time.monotonic()
-    ts_start = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
-    print(f"{ts_start} {request.method} {request.url.path} started", flush=True)
+    print(f"{_log_timestamp()} {request.method} {request.url.path} started", flush=True)
 
     response = await call_next(request)
 
     duration_ms = (time.monotonic() - start) * 1000
-    ts_end = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
     print(
-        f"{ts_end} {request.method} {request.url.path} -> {response.status_code} "
+        f"{_log_timestamp()} {request.method} {request.url.path} -> {response.status_code} "
         f"({duration_ms:.0f}ms)",
         flush=True,
     )
@@ -165,14 +190,34 @@ class CloneRequest(BaseModel):
 
 @app.post("/vm/clone")
 def clone_vm(req: CloneRequest):
-    if req.new_vmid == PVE_TEMPLATE_VMID:
+    if req.new_vmid in PVE_GOLDEN_VMIDS:
         raise HTTPException(
             status_code=403,
             detail=(
-                f"new_vmid {req.new_vmid} matches the golden template's own "
-                "vmid — refusing to clone onto/over the template itself."
+                f"new_vmid {req.new_vmid} matches a golden image's own "
+                "vmid — refusing to clone onto/over a golden image itself."
             ),
         )
+    # Proxmox gives a full clone's NIC a fresh, randomly generated MAC by
+    # default — confirmed against a real clone here. This range's dnsmasq
+    # static reservations (range-gw/dnsmasq.d/range.conf) are keyed to each
+    # golden image's OWN original MAC, so a clone with a regenerated MAC
+    # gets no matching DHCP reservation at all, and — if the guest's own
+    # network config (e.g. a NetworkManager profile pinned to that MAC via
+    # HWADDR/mac-address=) only activates for that exact MAC — its NIC can
+    # come up administratively down too, with no IP and no obvious link to
+    # "wrong MAC" from inside the guest.
+    #
+    # Fix: read the template's own net0 line and force the clone to carry
+    # the identical value (same MAC, same model/bridge/etc.), so the
+    # existing per-vmid dnsmasq reservation and the guest's own network
+    # config keep working unchanged, with no new per-vmid config to
+    # maintain here. Safe under the existing golden/working invariant
+    # (only one working clone of a given golden vmid is ever live at a
+    # time), so the MAC is never duplicated on the wire.
+    template_config = pve_request("GET", f"/qemu/{req.template_vmid}/config")
+    template_net0 = template_config.get("net0")
+
     upid = pve_request(
         "POST",
         f"/qemu/{req.template_vmid}/clone",
@@ -184,7 +229,57 @@ def clone_vm(req: CloneRequest):
         },
     )
     wait_for_task(upid)
+
+    if template_net0:
+        pve_request("PUT", f"/qemu/{req.new_vmid}/config", data={"net0": template_net0})
+
     return {"vmid": req.new_vmid, "status": "cloned"}
+
+
+@app.get("/vm/{vmid}/status")
+def vm_status(vmid: int):
+    # Added after a real gap surfaced: NOTHING in this bridge could
+    # previously answer "does this vmid still exist / what's it doing
+    # right now" without side effects. An operator manually destroying
+    # a working clone directly in Proxmox (outside this bridge, outside
+    # range_traversal.py) left the calling agent with a stale
+    # working_vmid in its own state and no read-only way to check
+    # reality — it fell back to guessing from a GET that doesn't exist
+    # (405) and then from an exec call's error, which is ambiguous (a
+    # fast failure there looks the same whether the vmid is genuinely
+    # gone or the guest agent just isn't up yet). This closes that gap.
+    #
+    # Deliberately NOT behind guard_not_template: this is read-only and
+    # carries zero mutation risk even against a golden vmid — in fact
+    # checking a golden image's own running/stopped state (e.g. while
+    # manually prepping golden images for first boot) is a legitimate,
+    # harmless use of this same endpoint.
+    #
+    # NEW, UNTESTED CODE — the "doesn't exist" detection below was
+    # written from the error text Proxmox returned in a DIFFERENT call
+    # (a start attempt on a destroyed vmid: "Configuration file
+    # '...950.conf' does not exist"), not yet confirmed against this
+    # exact endpoint (GET .../status/current) called on a genuinely
+    # nonexistent vmid. Verify the real error text/status code once
+    # against a real target before trusting the exists:false branch —
+    # if Proxmox phrases it differently here, broaden the match below
+    # rather than assuming this already covers it.
+    try:
+        status = pve_request("GET", f"/qemu/{vmid}/status/current")
+    except HTTPException as exc:
+        detail_text = str(exc.detail).lower()
+        if exc.status_code in (500, 596) and (
+            "does not exist" in detail_text or "no such" in detail_text
+        ):
+            return {"vmid": vmid, "exists": False}
+        raise
+    return {
+        "vmid": vmid,
+        "exists": True,
+        "status": status.get("status"),
+        "name": status.get("name"),
+        "uptime": status.get("uptime"),
+    }
 
 
 @app.post("/vm/{vmid}/start")

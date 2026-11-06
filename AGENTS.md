@@ -351,3 +351,44 @@ scope explicitly (e.g. `--scope ctfq.u1tramarine.blue`) — do not assume
 any tool already knows it, and do not try to derive it from a challenge
 page yourself. Update this section directly when moving to a different
 platform (e.g. HTB) — no code changes should be needed anywhere else.
+
+## Current range assessment scope
+
+Active range: [fill in your range's name/identifier here] — see
+`skills/security/range-assess/config/hosts.json` (your own, real,
+untracked copy — the committed file is a sanitized template) for the
+full host list, VMIDs, and addresses. Fill in a one-line summary here
+of how many hosts and what OS mix, if that's useful to have at a
+glance — this section intentionally ships without real numbers since
+`hosts.json` itself is the source of truth and isn't committed.
+
+Every host's golden image (`<host>-golden`, fixed VMID per
+`hosts.json`) is never a valid target for scanning, exploitation, or
+remediation — only `proxmox_bridge.py`'s `/vm/clone` may ever reference
+one, and only as the clone source. All real work happens against a
+working clone (`<host>-ctf`), created before and destroyed after each
+assessment run. If any host carries a real-world safety dimension (see
+`hosts.json`'s optional per-host `note` field), record the operator's
+own confirmation of its isolation here too, so it isn't buried in a
+file nobody reads this section without also opening.
+
+When using `range_discover.py`, `range_host_audit.py`, `range_poc.py`,
+or `range_remediate.py` directly (outside `range_traversal.py`), always
+pass both `--golden-vmid` and `--working-vmid` explicitly — never
+assume a script already knows which is which, and never pass the same
+value for both (every script that touches a target hard-refuses this
+on purpose).
+
+No script in this skill ever calls a model. `range_poc.py`/
+`range_remediate.py`'s `assign` subcommands only hand you a filled task
+prompt; YOU do the real exploitation/remediation work yourself, with
+your own tools, before calling `report`. `range_host_audit.py` runs via
+Proxmox's guest-exec channel as the guest's own privileged service
+account (root/SYSTEM) — its findings show that a local condition
+exists, not that an unprivileged user has already exploited it; that
+distinction is the PoC step's job, not the audit's.
+
+Update this section directly when the range's host list changes (a
+host added, retired, or re-IP'd) — no code changes should be needed
+anywhere else; `hosts.json` is the source of truth the scripts actually
+read, so update that file too, not just this prose summary of it.

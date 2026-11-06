@@ -1,0 +1,86 @@
+Resume the range-assess sweep using the range-assess skill, in this
+fresh session. DO NOT run `init` again — real progress exists.
+
+    python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py status
+
+Before doing anything else, read that status output directly — it is
+ground truth for which hosts are scanned/audited and which findings are
+at which stage. Do not rely on any prior session's self-reported
+summary; cross-check against /workspace/.range_poc_log.json and
+/workspace/.range_remediate_log.json for what was actually attempted
+and with what result.
+
+Reminder, same as the init prompt: NO script in this skill ever calls a
+model. `assign-poc`/`assign-remediate` only hand you a task prompt —
+YOU do the real exploitation/remediation work yourself (real network
+access for a network-scope finding, real proxmox_bridge.py guest-exec
+calls for a local-scope one), then `report-poc`/`report-remediate`
+validate and log what you report back.
+
+If a working VM clone was left running from a prior attempt that ended
+abruptly (crash, budget cutoff, Ctrl-C), it is NOT automatically
+destroyed — `status`'s per-host `working_vmid` field tells you which
+ones exist. Before assessing a host further, confirm its working clone
+is actually still the one you expect rather than assuming a fresh one
+is needed; cloning is the single slowest step in this whole loop.
+
+THE LOOP — do this repeatedly:
+
+1. python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py next
+   Follow the returned "action" exactly — see
+   scripts/range-sweep-init-prompt.txt's own STEP 2 for what each
+   action (`clone_and_scan`, `local_audit`, `assign_poc`,
+   `assign_remediate`, `assign_reverify`, `review_needed`) means and
+   what to do for it in full. Do not re-derive that mapping from memory
+   if this file and the init prompt ever drift — the init prompt is the
+   fuller reference; this file assumes you already know the loop shape
+   from a prior attempt in this same sweep.
+2. For `assign_poc`/`assign_remediate`/`assign_reverify`: call the
+   matching `assign-*` command, read its returned prompt, DO THE REAL
+   WORK YOURSELF with your own tools, write your result JSON, then call
+   the matching `report-*` command. Nothing happens automatically
+   between `assign` and `report` — that gap is where you actually act.
+3. For "review_needed": call `status` and read the finding's existing
+   `remediation_summary` and `evidence`/`poc_method` before proposing
+   another remediation — a repeat of the identical fix that already
+   failed to close the finding wastes a turn and tells you nothing new.
+4. Once every finding on a host reaches a terminal status, destroy that
+   host's working image via proxmox_bridge.py
+   (POST /vm/<working_vmid>/stop, then DELETE /vm/<working_vmid>)
+   before moving on to the next host.
+5. Go back to step 1.
+
+Never edit /workspace/.range_traversal_state.json,
+/workspace/.range_poc_log.json, or /workspace/.range_remediate_log.json
+directly — not via execute_code, write_file, terminal, or any means
+other than range_traversal.py's own commands. You have no authority to
+force a finding's status or bypass an attempt cap yourself, no matter
+how confident the judgment feels.
+
+Never pass a golden VMID as --working-vmid to any script, and never
+act against any address or VM other than the specific working clone's
+own, for the finding at hand.
+
+DO NOT STOP. Keep working the loop continuously, host after host,
+finding after finding, without pausing to report, summarize, or check
+in — including during a long clone wait, where the right move is to
+come back and check again, not to narrate that you're waiting. There
+are only three legitimate reasons to stop:
+
+1. The traversal reports "done": true — every host scanned (both
+   phases) and every finding resolved to a terminal status. Stop and
+   give the final summary.
+2. You are certain you are running low on context or response budget
+   right now, in this exact moment — not "I've done a few hosts so
+   here's an update."
+3. Something is genuinely broken in a way no tool or technique can work
+   around (report exactly what and why).
+
+Nothing else justifies pausing. If you find yourself about to write a
+sentence like "here's my progress so far" or "I am continuing the
+loop," that is the signal to NOT send that message and instead take the
+next concrete action immediately.
+
+Only when genuinely done (or blocked, or out of budget): report full
+progress and give a complete summary, including every finding left in
+"review_needed" for the operator's own attention.
