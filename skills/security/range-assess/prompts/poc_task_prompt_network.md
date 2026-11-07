@@ -65,8 +65,31 @@ right now, in this turn. Then:
 
 ## Reporting your result
 
-Write your result as JSON to a file of your own choosing, e.g.
-`/workspace/result_{{finding_id}}.json`:
+For any step beyond a single one-line command — a brute-force loop, a
+decode/parse routine, a protocol client, anything you'd normally write
+as a script rather than type at a prompt — **save the actual script to
+`/workspace` and run it from there**, then list its real path in
+`commands_run`, not a prose description of what it does (e.g.
+"ran /workspace/krb_bruteforce_{{finding_id}}.py against the 7
+hashes", not "python3 hashlib brute-force of a ~40-word candidate
+list"). A human — or another session — needs to be able to open that
+exact file and rerun it; a sentence describing what a script would do
+is not independently verifiable.
+
+If your method derives a credential, token, or other material
+**offline** (a cracked hash, a decoded secret, a forged ticket) and
+you're reporting `reachable: true` on that basis, also write and run a
+**second** script that uses the derived material against the live
+target's real auth path (not a local reproduction of its check), and
+include that script's path and its actual output in
+`commands_run`/`evidence` too. A match against an offline hash dump by
+itself does not prove the live target accepts it.
+
+Write your result as JSON to
+`/workspace/result_{{working_vmid}}_{{finding_id}}.json` — use
+`{{working_vmid}}`, not `{{golden_vmid}}`: the attempt log this feeds
+into is keyed by the working vmid, so a result file named after the
+golden vmid instead is hard to cross-reference against it later:
 
 ```json
 {
@@ -87,4 +110,7 @@ python3 .../range_poc.py report \
 ```
 
 That call is what actually validates and logs your result — writing
-the JSON file yourself is not the final step.
+the JSON file yourself is not the final step. (It also saves a
+canonical copy at that same `result_{{working_vmid}}_{{finding_id}}.json`
+path regardless of what you named your own file, so following the
+naming above just means there's nothing extra to reconcile.)

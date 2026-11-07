@@ -4,7 +4,7 @@ on the same design as ctf_traversal.py: explicit params, a lock
 spanning the whole load-modify-save span of every subcommand that
 touches state, and bookkeeping-only logic that hands the real work out
 to other scripts via subprocess — range_discover.py (network scan),
-range_host_audit.py (local guest-exec enumeration), range_poc.py and
+range_host_audit.py (local SSH enumeration), range_poc.py and
 range_remediate.py (PoC/remediation guardrails) — the same run_script()
 pattern ctf_traversal.py uses for ksnctf-discover/ctf-solver/
 ksnctf-submit.
@@ -46,7 +46,7 @@ Usage:
     python3 range_traversal.py record-scan --vmid <golden_vmid> --working-vmid <id> \
         --target <ip> --discover <path to range_discover.py>
     python3 range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <id> \
-        --audit <path to range_host_audit.py>
+        --target <ip> --audit <path to range_host_audit.py>
     python3 range_traversal.py assign-poc --vmid <golden_vmid> --finding <finding_id> \
         --poc-script <path to range_poc.py> [--reverify]
     python3 range_traversal.py report-poc --vmid <golden_vmid> --finding <finding_id> \
@@ -174,9 +174,10 @@ def host_action(vmid: str, rec: dict):
         }
     if rec["network_scan_status"] == "scanned" and rec["local_audit_status"] == "not_started":
         return {
-            "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"], "action": "local_audit",
-            "note": "Call range_host_audit.py against the working clone via proxmox_bridge.py's "
-                    "guest-exec channel and feed the result to `record-audit`.",
+            "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+            "target": rec["last_scan_target"] or rec["ipv4"], "action": "local_audit",
+            "note": "Call range_host_audit.py against the working clone over SSH (root/Administrator) "
+                    "and feed the result to `record-audit`.",
         }
 
     for fid, finding in rec["findings"].items():
@@ -260,7 +261,7 @@ def cmd_record_scan(vmid: str, working_vmid: str, target: str, discover_script: 
     print(json.dumps({"recorded": True, "reachable": True, "findings_total": len(rec["findings"])}, indent=2))
 
 
-def cmd_record_audit(vmid: str, working_vmid: str, audit_script: str, timeout: int):
+def cmd_record_audit(vmid: str, working_vmid: str, target: str, audit_script: str, timeout: int):
     with state_lock():
         state = load_state()
         if vmid not in state["hosts"]:
@@ -271,7 +272,7 @@ def cmd_record_audit(vmid: str, working_vmid: str, audit_script: str, timeout: i
 
         audit_args = [
             "audit", "--golden-vmid", vmid, "--working-vmid", working_vmid, "--os", rec["os"],
-            "--timeout", str(timeout),
+            "--target", target, "--timeout", str(timeout),
         ]
         audit_result = run_script(audit_script, audit_args)
 
@@ -325,7 +326,8 @@ def cmd_assign_poc(vmid: str, fid: str, poc_script: str, max_attempts: int, time
         }
     else:
         context = {"category": finding["category"], "command": finding["command"],
-                    "output": finding["output"], "description": finding["description"]}
+                    "output": finding["output"], "description": finding["description"],
+                    "target": rec["last_scan_target"] or rec["ipv4"]}
     if reverify:
         # Reverify must target the SAME method that originally confirmed this
         # finding, not a fresh exploration — see range_poc.py's
@@ -407,7 +409,7 @@ def cmd_assign_remediate(vmid: str, fid: str, remediate_script: str, dry_run: bo
 
     context = {
         "scope": finding["scope"], "finding_description": finding_description(finding),
-        "target": (rec["last_scan_target"] or rec["ipv4"]) if finding["scope"] == "network" else "",
+        "target": rec["last_scan_target"] or rec["ipv4"],
         "poc_evidence": finding["poc_evidence"], "poc_method": finding["poc_method"],
     }
     ctx_path = context_path(fid, "remediate")
@@ -541,6 +543,7 @@ def main():
     p_ra = sub.add_parser("record-audit")
     p_ra.add_argument("--vmid", required=True)
     p_ra.add_argument("--working-vmid", required=True)
+    p_ra.add_argument("--target", required=True, help="working clone's IPv4/IPv6 address")
     p_ra.add_argument("--audit", required=True, help="path to range_host_audit.py")
     p_ra.add_argument("--timeout", type=int, default=330)
 
@@ -588,7 +591,7 @@ def main():
     elif args.command == "record-scan":
         cmd_record_scan(args.vmid, args.working_vmid, args.target, args.discover, args.nmap_path, args.ports)
     elif args.command == "record-audit":
-        cmd_record_audit(args.vmid, args.working_vmid, args.audit, args.timeout)
+        cmd_record_audit(args.vmid, args.working_vmid, args.target, args.audit, args.timeout)
     elif args.command == "assign-poc":
         cmd_assign_poc(args.vmid, args.finding, args.poc_script, args.max_attempts, args.time_budget_minutes, args.reverify)
     elif args.command == "report-poc":

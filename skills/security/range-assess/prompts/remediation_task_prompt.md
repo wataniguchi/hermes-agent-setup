@@ -30,24 +30,46 @@ prior step confirmed the following finding (`{{finding_id}}`, scope
    permissions bit, rotating a weak credential, etc. Prefer the
    smallest change that actually closes the finding over a broad
    hardening pass.
-2. Apply it yourself, using your own tools: a network-scope finding's
-   fix typically runs on `{{host}}-ctf` (VMID `{{working_vmid}}`) over
-   whatever administrative access your assessment session already has;
-   a local-scope finding's fix runs via `proxmox_bridge.py`'s guest-exec
-   channel (`POST /vm/{{working_vmid}}/exec`), the same channel the
-   audit and PoC steps used. **Never target the golden image
-   (VMID `{{golden_vmid}}`) or any other VMID.**
-3. If the fix requires a judgment call the operator should make
-   (e.g. a service they may need kept open, a breaking change), say so
-   instead of applying it, and explain the trade-off.
-4. **dry_run for this assignment is `{{dry_run}}`.** If that's `true`,
+2. Apply it yourself, using your own tools. For a network-scope
+   finding, that means whatever *legitimate* administrative or
+   management surface the application itself actually exposes over
+   the network — a real admin API endpoint, a config-upload path, a
+   service's own control interface. **There is no standing SSH or
+   admin credential provisioned for these hosts beyond whatever the
+   app offers on its own** — don't assume one exists just because a
+   fix conceptually needs filesystem/config access; probe for it for
+   real. For a local-scope finding, it's `proxmox_bridge.py`'s
+   guest-exec channel (`POST /vm/{{working_vmid}}/exec`), the same
+   channel the audit and PoC steps used — check whether it's actually
+   available for this vmid rather than assuming either way. **Never
+   target the golden image (VMID `{{golden_vmid}}`) or any other
+   VMID.**
+3. If, after actually checking (not assuming), neither a legitimate
+   network-facing admin surface nor guest-exec is available for this
+   finding, that is a genuine, expected outcome for some findings — not
+   a failure on your part. Say so explicitly, set `"applied": false`,
+   and report `"needs_operator_decision": true`: the fix needs either
+   guest/console access this assessment doesn't have, or an
+   application-level code change only the operator can make.
+4. If the fix requires a judgment call the operator should make
+   instead (e.g. a service they may need kept open, a breaking change),
+   say so instead of applying it, and explain the trade-off.
+5. **dry_run for this assignment is `{{dry_run}}`.** If that's `true`,
    propose the fix but do not apply it, and set `"applied": false` in
    your report regardless of how confident the proposal is.
 
 ## Reporting your result
 
-Write your result as JSON to a file of your own choosing, e.g.
-`/workspace/remediation_result_{{finding_id}}.json`:
+For any applied fix beyond a single one-line command — a multi-step
+config rewrite, a script that rotates all the affected credentials,
+etc. — save the actual script/diff to `/workspace` and list its real
+path in `commands_or_diff`, not a prose description of it.
+
+Write your result as JSON to
+`/workspace/remediation_result_{{working_vmid}}_{{finding_id}}.json` —
+use `{{working_vmid}}`, not `{{golden_vmid}}`: the remediation log this
+feeds into is keyed by the working vmid, so a result file named after
+the golden vmid instead is hard to cross-reference against it later:
 
 ```json
 {
@@ -68,4 +90,8 @@ python3 .../range_remediate.py report \
 ```
 
 That call is what actually validates and logs your result — writing
-the JSON file yourself is not the final step.
+the JSON file yourself is not the final step. (It also saves a
+canonical copy at that same
+`remediation_result_{{working_vmid}}_{{finding_id}}.json` path
+regardless of what you named your own file, so following the naming
+above just means there's nothing extra to reconcile.)

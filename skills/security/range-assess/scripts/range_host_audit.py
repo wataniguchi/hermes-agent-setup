@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 range_host_audit.py — local-vantage-point enumeration of ONE working
-clone via Proxmox's QEMU guest-exec channel (proxmox_bridge.py's
-POST /vm/{vmid}/exec — virtio-serial, NOT the guest's own network
-interface). Complements range_discover.py's external network scan with
+clone over SSH (as `root` on Linux, `Administrator` on Windows — NOT
+proxmox_bridge.py's guest-exec channel; see "WHY SSH, NOT GUEST-EXEC"
+below). Complements range_discover.py's external network scan with
 what can only be seen (or meaningfully checked) from inside the guest:
 exact locally-installed package/kernel versions, SUID/SGID binaries,
 world-writable files/dirs, cron/sudoers entries, loopback-only listening
@@ -14,26 +14,41 @@ STATELESS, like range_discover.py and ksnctf_discover.py — it only
 reports what it finds; range_traversal.py (via its `record-audit`
 subcommand) decides what to do with the result.
 
-PRIVILEGE CAVEAT — read this before trusting any output. `qm guest
-exec` runs through the QEMU Guest Agent, which executes as the guest's
-own privileged service account: root on Linux, SYSTEM on Windows. This
-script therefore sees EVERYTHING on the guest, not what an actual
-unprivileged local user could see. That's the whole point of running
-it this way: every check below exists specifically to surface
-conditions an unprivileged user (or a remote attacker who has already
-landed a low-privilege shell) could abuse — a world-writable file a
-root-owned cron job reads, a SUID binary, a NOPASSWD sudo rule, a
-service running from a writable or unquoted path. The privileged
-vantage point is what lets this script SEE those conditions in one
-pass; it is not itself evidence that an unprivileged user has already
-exploited one. That demonstration is `range_poc.py`'s job (specifically
-its `--scope local` path, prompts/poc_task_prompt_local.md), which
-reasons about and attempts to actually reproduce the finding from as
-close to an unprivileged actor's position as the check in question
-allows.
+WHY SSH, NOT GUEST-EXEC: this originally ran over proxmox_bridge.py's
+guest-exec channel (QEMU Guest Agent, virtio-serial). That turned out
+to need `agent: 1` set on the golden image's own VM config, which was
+absent on every golden image checked so far (9101-9103) — "No QEMU
+guest agent configured" is Proxmox failing fast because the
+virtio-serial device for the agent doesn't exist on the VM at all, not
+the daemon being unreachable inside the guest. Rather than add that
+config to every golden image, the operator switched this skill to a
+different standing channel instead: the `hermes` sandbox's own SSH
+keypair, authorized on every target host for `root` (Linux) /
+`Administrator` (Windows), reachable now that the sandbox has a real
+network route to the range (see this skill's own history of that
+networking fix). This script's command-execution shape changed; the
+privilege model (full root/Administrator access) and everything it
+implies for the PRIVILEGE CAVEAT below did not.
 
-NEW, UNTESTED CODE — nothing here has been run against a real host in
-the range yet. Every check is read-only enumeration: find/ls/cat of
+PRIVILEGE CAVEAT — read this before trusting any output. This script
+connects as `root` (Linux) / `Administrator` (Windows), so it sees
+EVERYTHING on the guest, not what an actual unprivileged local user
+could see. That's the whole point of running it this way: every check
+below exists specifically to surface conditions an unprivileged user
+(or a remote attacker who has already landed a low-privilege shell)
+could abuse — a world-writable file a root-owned cron job reads, a
+SUID binary, a NOPASSWD sudo rule, a service running from a writable or
+unquoted path. The privileged vantage point is what lets this script
+SEE those conditions in one pass; it is not itself evidence that an
+unprivileged user has already exploited one. That demonstration is
+`range_poc.py`'s job (specifically its `--scope local` path,
+prompts/poc_task_prompt_local.md), which reasons about and attempts to
+actually reproduce the finding from as close to an unprivileged actor's
+position as the check in question allows.
+
+Confirmed running against real hosts in the range over SSH — a live
+sweep is producing real findings from the checks below. Every check is
+read-only enumeration: find/ls/cat of
 metadata, dpkg/rpm queries, systemctl/ss listings, PowerShell Get-*
 cmdlets. Nothing here modifies guest state or attempts exploitation —
 that boundary is deliberate, same as every other script in this skill.
@@ -42,8 +57,8 @@ completeness — see SKILL.md for how to extend it; the LINUX_CHECKS /
 WINDOWS_CHECKS lists below are the one place to add more.
 
 Usage:
-    python3 range_host_audit.py audit --golden-vmid 9001 --working-vmid <clone vmid> --os Linux
-    python3 range_host_audit.py audit --golden-vmid 9001 --working-vmid <clone vmid> --os Windows --timeout 300
+    python3 range_host_audit.py audit --golden-vmid 9001 --working-vmid <clone vmid> --os Linux --target <ip>
+    python3 range_host_audit.py audit --golden-vmid 9001 --working-vmid <clone vmid> --os Windows --target <ip> --timeout 300
 
 Outputs: {"working_vmid": N, "reachable": bool, "os": "...",
           "findings": [{"category": "...", "description": "...",
@@ -51,33 +66,78 @@ Outputs: {"working_vmid": N, "reachable": bool, "os": "...",
                          "output": "...", "truncated": bool}],
           "errors": ["per-check failures that didn't abort the audit"]}
 
-Set PROXMOX_BRIDGE_URL to override the default
-http://host.docker.internal:8811 — same convention already used by
-skills/security/windows-binary-analysis/scripts/analyze_windows_binary.py,
-which this script's bridge-calling helper is deliberately copied from.
+Pass --ssh-identity to use a non-default private key; otherwise `ssh`
+resolves its own default identity (e.g. ~/.ssh/id_ed25519) the normal
+way.
+
+HOST-KEY CHECKING IS DELIBERATELY DISABLED (StrictHostKeyChecking=no,
+UserKnownHostsFile=/dev/null) — this range is private and
+operator-controlled, and every target here is a disposable clone this
+same skill destroys and re-creates routinely, so host keys churn by
+design, not by attack. Do not reuse this setting against anything you
+don't fully control end-to-end.
 """
 import argparse
 import json
-import os
+import shlex
+import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 
-BRIDGE_URL = os.environ.get("PROXMOX_BRIDGE_URL", "http://host.docker.internal:8811")
 MAX_OUTPUT_CHARS = 20000
+SSH_USER = {"Linux": "root", "Windows": "Administrator"}
+SSH_OPTS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "LogLevel=ERROR",
+]
 
 
-def call(method: str, path: str, body: dict | None = None, params: dict | None = None, timeout: int = 330) -> dict:
-    url = f"{BRIDGE_URL}{path}"
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+def ssh_exec(target: str, os_name: str, argv: list, identity: str | None, timeout: int) -> dict:
+    """Runs argv on `target` over SSH as root (Linux) / Administrator
+    (Windows). Returns {"exitcode", "stdout", "stderr"} — the same
+    shape the old guest-agent exec call returned, so the rest of this
+    script didn't need to change. Raises RuntimeError if SSH itself
+    couldn't connect or authenticate (distinct from the remote COMMAND
+    failing, which is a normal per-check result, not an error here).
+
+    NOTE: ssh's own convention is to exit 255 when the ssh client
+    itself fails (no route, auth failure, etc.) — but a remote command
+    that legitimately exits 255 on its own is indistinguishable from
+    that by the exit code alone. None of the checks below are expected
+    to do that; flagging it here rather than pretending it can't
+    happen.
+    """
+    user = SSH_USER[os_name]
+    if os_name == "Windows":
+        # Windows OpenSSH's default remote shell is cmd.exe, whose
+        # quoting rules aren't POSIX. None of WINDOWS_CHECKS below embed
+        # a literal double quote, so wrapping any multi-word argv
+        # element in double quotes is safe for the current check list —
+        # it is NOT a general cmd.exe-quoting solution; a future check
+        # containing an embedded " will need more care here.
+        remote_cmd = " ".join(f'"{a}"' if " " in a else a for a in argv)
+    else:
+        remote_cmd = shlex.join(argv)
+
+    ssh_argv = ["ssh"] + SSH_OPTS
+    if identity:
+        ssh_argv += ["-i", identity]
+    ssh_argv += [f"{user}@{target}", remote_cmd]
+
+    try:
+        proc = subprocess.run(ssh_argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh to {user}@{target} timed out after {timeout}s")
+    except FileNotFoundError:
+        raise RuntimeError("`ssh` not found on PATH in this environment")
+
+    if proc.returncode == 255:
+        raise RuntimeError(
+            f"ssh to {user}@{target} failed at the connection/auth level (exit 255): {proc.stderr.strip()}"
+        )
+    return {"exitcode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
 
 
 # (category, argv, human-readable description of what this is looking for)
@@ -184,30 +244,22 @@ def cmd_audit(args):
     probe_cmd = ["sh", "-c", "true"] if args.os == "Linux" else ["cmd", "/c", "ver"]
 
     try:
-        probe = call("POST", f"/vm/{args.working_vmid}/exec", {"command": probe_cmd}, timeout=args.timeout)
-    except urllib.error.HTTPError as e:
-        print(json.dumps({
-            "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
-            "errors": [f"bridge error ({e.code}): {e.read().decode(errors='replace')}"],
-        }, indent=2))
-        return
-    except urllib.error.URLError as e:
+        probe = ssh_exec(args.target, args.os, probe_cmd, args.ssh_identity, args.timeout)
+    except RuntimeError as e:
         print(json.dumps({
             "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
             "errors": [
-                f"could not reach bridge at {BRIDGE_URL}: {e.reason}. Confirm proxmox_bridge.py is "
-                "running and reachable, and that the working clone is actually started with its "
-                "guest agent responsive — this failure does not by itself mean the guest agent "
-                "is down; a VM that's merely not started yet looks identical from here."
+                f"{e} — this failure does not by itself mean the host is actually unreachable; "
+                "a VM that's merely not started yet, or still booting, looks identical from here."
             ],
         }, indent=2))
         return
 
-    if probe.get("exitcode") != 0:
+    if probe["exitcode"] != 0:
         print(json.dumps({
             "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
-            "errors": [f"guest agent reachable but probe command failed (exitcode {probe.get('exitcode')}): "
-                       f"{probe.get('stderr', '')}"],
+            "errors": [f"SSH connected but the probe command failed (exitcode {probe['exitcode']}): "
+                       f"{probe['stderr']}"],
         }, indent=2))
         return
 
@@ -215,23 +267,20 @@ def cmd_audit(args):
     errors = []
     for category, argv, description in checks:
         try:
-            result = call("POST", f"/vm/{args.working_vmid}/exec", {"command": argv}, timeout=args.timeout)
-        except urllib.error.HTTPError as e:
-            errors.append(f"{category}: bridge error ({e.code}): {e.read().decode(errors='replace')}")
-            continue
-        except urllib.error.URLError as e:
-            errors.append(f"{category}: could not reach bridge: {e.reason}")
+            result = ssh_exec(args.target, args.os, argv, args.ssh_identity, args.timeout)
+        except RuntimeError as e:
+            errors.append(f"{category}: {e}")
             continue
         except Exception as e:
             errors.append(f"{category}: unexpected error: {e}")
             continue
 
-        output, truncated = truncate(result.get("stdout", "") + result.get("stderr", ""))
+        output, truncated = truncate(result["stdout"] + result["stderr"])
         findings.append({
             "category": category,
             "description": description,
             "command": " ".join(argv),
-            "exit_code": result.get("exitcode"),
+            "exit_code": result["exitcode"],
             "output": output,
             "truncated": truncated,
         })
@@ -250,7 +299,9 @@ def main():
     p_audit.add_argument("--golden-vmid", type=int, required=True)
     p_audit.add_argument("--working-vmid", type=int, required=True)
     p_audit.add_argument("--os", choices=["Linux", "Windows"], required=True)
-    p_audit.add_argument("--timeout", type=int, default=330, help="per-command exec timeout, seconds")
+    p_audit.add_argument("--target", required=True, help="working clone's IPv4/IPv6 address")
+    p_audit.add_argument("--ssh-identity", default=None, help="private key path; default: ssh's own default identity")
+    p_audit.add_argument("--timeout", type=int, default=330, help="per-command SSH timeout, seconds")
 
     args = parser.parse_args()
     if args.command == "audit":

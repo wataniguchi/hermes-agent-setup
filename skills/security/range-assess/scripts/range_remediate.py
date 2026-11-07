@@ -130,9 +130,18 @@ def cmd_report(args):
     log.setdefault(key, []).append({"timestamp": time.time(), "dry_run": args.dry_run, "result": result})
     save_log(log)
 
+    # Same canonical-copy fix as range_poc.py's cmd_report, and for the
+    # identical reason — see its comment. Keyed by working vmid, matching
+    # this log's own key, regardless of what --result-file was actually
+    # named.
+    canonical_path = os.path.join("/workspace", f"remediation_result_{args.working_vmid}_{args.finding_id}.json")
+    with open(canonical_path, "w") as f:
+        json.dump(result, f, indent=2)
+
     print(json.dumps({
         "reported": True, "finding_id": args.finding_id, "applied": result["applied"],
         "remediation_summary": result.get("remediation_summary", ""),
+        "canonical_result_file": canonical_path,
     }, indent=2))
 
 

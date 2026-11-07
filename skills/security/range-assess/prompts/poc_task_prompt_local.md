@@ -17,16 +17,16 @@ this purpose.
 {{reverify_banner}}
 ## Scope — read this before doing anything
 
-- **You act on the working clone `{{host}}-ctf` (VMID `{{working_vmid}}`)
-  only, via Proxmox's guest-exec channel — `POST /vm/{{working_vmid}}/exec`
-  on `proxmox_bridge.py`, never `/vm/{{golden_vmid}}/exec`** (the golden
-  image, which you must never touch). This is the same channel
-  `range_host_audit.py` used to find this condition in the first place.
+- **You act on the working clone `{{host}}-ctf` (VMID `{{working_vmid}}`,
+  address `{{target}}`) only, via SSH as `root` (Linux) / `Administrator`
+  (Windows) — never touch VMID `{{golden_vmid}}`** (the golden image).
+  This is the same account `range_host_audit.py` used to find this
+  condition in the first place.
 - Finding under test (`{{finding_id}}`), category `{{category}}`: the
   audit command `{{command}}` produced the output below. This output
-  was captured with the guest agent's own privileged account (root/
-  SYSTEM) — it shows you the condition exists, not that an unprivileged
-  user has already exploited it. That's what you're here to determine.
+  was captured as `root`/`Administrator` over SSH — it shows you the
+  condition exists, not that an unprivileged user has already exploited
+  it. That's what you're here to determine.
 
   ```
   {{audit_output}}
@@ -38,12 +38,16 @@ this purpose.
 
 Determine whether this specific local condition is genuinely exploitable
 by a realistic lower-privilege actor on this host — not from theory,
-from an actual attempt via guest-exec right now, in this turn. Where it
-makes sense for the finding (e.g. a SUID binary, a cron job reading a
-world-writable file, a NOPASSWD sudo rule), try to act it out as close
-to an unprivileged actor's own position as the guest-exec channel
-reasonably allows — e.g. invoke the SUID binary and show it does
-something an unprivileged caller shouldn't be able to do, write to the
+from an actual attempt over SSH right now, in this turn. You're
+connecting as `root`/`Administrator`, so where it makes sense for the
+finding (e.g. a SUID binary, a cron job reading a world-writable file, a
+NOPASSWD sudo rule), act it out as close to an unprivileged actor's own
+position as you reasonably can from there — e.g. `su`/`sudo -u` down to
+an unprivileged account first if the finding is specifically about what
+that account could do, rather than just proving the condition exists
+from the connection's own full-privilege vantage point. For example:
+invoke the SUID binary and show it does something an unprivileged
+caller shouldn't be able to do, write to the
 world-writable file and show the privileged job later executed or
 trusted your content, run the specific sudo command the rule grants and
 show what it actually lets you do. Then:
@@ -71,15 +75,34 @@ show what it actually lets you do. Then:
 
 ## Reporting your result
 
-Write your result as JSON to a file of your own choosing, e.g.
-`/workspace/result_{{finding_id}}.json`:
+For any step beyond a single one-line SSH command — a brute-force loop,
+a decode/parse routine, anything you'd normally write as a script
+rather than type at a prompt — **save the actual script to
+`/workspace` and run it from there (or on the working clone over SSH,
+as the finding requires)**, then list its real path in
+`commands_run`, not a prose description of what it does. A human — or
+another session — needs to be able to open that exact file and rerun
+it; a sentence describing what a script would do is not independently
+verifiable.
+
+If your method derives a credential or other material **offline** and
+you're reporting `reachable: true` on that basis, also write and run
+a **second** script that uses it against the real local condition (not
+a local reproduction of the check), and include that script's path and
+its actual output in `commands_run`/`evidence` too.
+
+Write your result as JSON to
+`/workspace/result_{{working_vmid}}_{{finding_id}}.json` — use
+`{{working_vmid}}`, not `{{golden_vmid}}`: the attempt log this feeds
+into is keyed by the working vmid, so a result file named after the
+golden vmid instead is hard to cross-reference against it later:
 
 ```json
 {
   "reachable": true | false | "inconclusive",
-  "method": "short description of what was attempted (what you ran via guest-exec, and why)",
+  "method": "short description of what was attempted (what you ran over SSH, and why)",
   "evidence": "the concrete proof — command output, retrieved value, etc.",
-  "commands_run": ["each guest-exec command actually run, in order"],
+  "commands_run": ["each SSH command actually run, in order"],
   "notes": "anything the operator should know (partial progress, dead ends, risk to flag for remediation)"
 }
 ```
@@ -93,4 +116,7 @@ python3 .../range_poc.py report \
 ```
 
 That call is what actually validates and logs your result — writing
-the JSON file yourself is not the final step.
+the JSON file yourself is not the final step. (It also saves a
+canonical copy at that same `result_{{working_vmid}}_{{finding_id}}.json`
+path regardless of what you named your own file, so following the
+naming above just means there's nothing extra to reconcile.)

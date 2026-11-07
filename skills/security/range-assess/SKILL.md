@@ -22,13 +22,13 @@ re-run the same demonstration to confirm each finding is closed.
 skill ever calls a model.** `range_traversal.py` is orchestration and
 bookkeeping only — same role `ctf_traversal.py` plays for ksnctf — wired
 to the project's own `proxmox_bridge.py` for every VM lifecycle
-operation and guest-exec call. `range_poc.py` and `range_remediate.py`
+operation. `range_poc.py` and `range_remediate.py`
 hand YOU (the agent) a filled, scope-appropriate task prompt and then
 validate/log whatever result you report back — they never attempt
 anything themselves. **"The local Qwen model does the PoC/remediation"
 means your own backend model, acting through your own normal
 tool-calling turn** (real network access for a network-scope finding,
-real calls to `proxmox_bridge.py`'s guest-exec endpoint for a
+an SSH session as `root`/`Administrator` on the working clone for a
 local-scope one) — not a second, separate, tool-less model call hidden
 inside a script. (An earlier version of this skill tried exactly that
 hidden-call shape and it was a real mistake: a bare Ollama chat call has
@@ -40,7 +40,7 @@ own docstring for the full account.)
 `config/hosts.json` is a golden VMID (`<host>-golden`, DO NOT
 MODIFY/DELETE). Every script here that acts against a target takes a
 separate `--working-vmid`/working clone (`<host>-ctf`) and hard-refuses
-(exit 1, before any network or guest-exec call) if that value matches
+(exit 1, before any network or SSH call) if that value matches
 the golden VMID passed alongside it. Creating and destroying the
 working clone is `proxmox_bridge.py`'s job, done outside this skill's
 own scripts.
@@ -59,23 +59,50 @@ privilege escalation actually depends on. Every host now gets BOTH:
 1. **Network scan** (`range_discover.py`) — nmap/port-connect from
    wherever this agent's own network egress reaches, same as before.
 2. **Local host audit** (`range_host_audit.py`) — enumeration from
-   INSIDE the guest, via `proxmox_bridge.py`'s guest-exec channel
-   (`qm guest exec`, virtio-serial — not the guest's network
-   interface): installed package/kernel versions, SUID/SGID binaries,
-   world-writable files/dirs, cron/sudoers entries, loopback-only
-   listening sockets, and Windows equivalents (unquoted service paths,
-   AlwaysInstallElevated, local admin membership, etc.).
+   INSIDE the guest, over SSH as `root` (Linux) / `Administrator`
+   (Windows) using the `hermes` sandbox's own keypair, authorized on
+   every target host: installed package/kernel versions, SUID/SGID
+   binaries, world-writable files/dirs, cron/sudoers entries,
+   loopback-only listening sockets, and Windows equivalents (unquoted
+   service paths, AlwaysInstallElevated, local admin membership, etc.).
+   (This originally went over `proxmox_bridge.py`'s guest-exec channel;
+   see the "Local audit: SSH, not guest-exec" section below for why
+   that changed.)
 
 **Read `range_host_audit.py`'s own docstring before trusting its
-output**: `qm guest exec` runs as the guest's privileged service
-account (root/SYSTEM), so the audit sees everything — that's the point,
-since every check exists to find conditions an *unprivileged* actor
-could abuse. The audit result is evidence a condition exists, not
+output**: it connects as `root`/`Administrator` over SSH, so the audit
+sees everything — that's the point, since every check exists to find
+conditions an *unprivileged* actor could abuse. The audit result is
+evidence a condition exists, not
 evidence it's been exploited; that's the PoC step's job.
 
 Every finding, from either phase, is tracked the same way in
 `range_traversal.py`'s state, tagged `"scope": "network"` or
 `"scope": "local"`.
+
+## Local audit: SSH, not guest-exec
+
+`range_host_audit.py` and the local-scope PoC/remediation prompts
+originally ran over `proxmox_bridge.py`'s guest-exec channel (QEMU
+Guest Agent, virtio-serial). On the real range, that failed with
+"No QEMU guest agent configured" on every golden image tried
+(9101–9103) — confirmed via `qm config <vmid> | grep -i agent` on the
+Proxmox host: the `agent: 1` flag (which creates the virtio-serial
+device the guest agent needs) was absent from all of them, not just
+the daemon being unresponsive inside the guest. Rather than add that
+config to every golden image, the operator switched this skill's local
+vantage point to a standing channel instead: the `hermes` sandbox's own
+SSH keypair, authorized on every target host for `root` (Linux) /
+`Administrator` (Windows) — reachable now that the sandbox has a real
+network route into the range. `--target <ip>` now flows through
+`record-audit`/`assign-poc`/`assign-remediate` to `range_host_audit.py`
+and the local-scope prompts the same way it already did for
+network-scope findings, instead of being left empty for local ones.
+The privilege model (full root/Administrator access, same caveat as
+before) is unchanged — only the transport is different. Host-key
+checking is deliberately disabled for this SSH channel (see
+`range_host_audit.py`'s own docstring for why that's a reasoned
+tradeoff here, not an oversight).
 
 ## Usage — single host, one pass through the loop
 
@@ -86,7 +113,7 @@ curl -X POST http://host.docker.internal:8811/vm/1234/start
 
 # 2. Scan it — network, then local
 python3 scripts/range_discover.py scan --target <working clone's ip>
-python3 scripts/range_host_audit.py audit --golden-vmid 9001 --working-vmid 1234 --os Linux
+python3 scripts/range_host_audit.py audit --golden-vmid 9001 --working-vmid 1234 --os Linux --target <working clone's ip>
 
 # 3. For each finding, get the task prompt — this does NOT call a model
 python3 scripts/range_poc.py assign \
@@ -94,7 +121,7 @@ python3 scripts/range_poc.py assign \
     --finding-id f-abc123 --scope network --context-file /workspace/ctx_f-abc123.json
 
 # 4. YOU do the real work with YOUR OWN tools (network for scope=network,
-#    proxmox_bridge.py guest-exec calls for scope=local), write your
+#    an SSH session as root/Administrator for scope=local), write your
 #    result as JSON, then report it — THIS validates and logs it:
 python3 scripts/range_poc.py report \
     --golden-vmid 9001 --working-vmid 1234 \
@@ -133,7 +160,7 @@ script makes for you.
 python3 scripts/range_traversal.py init --config ../config/hosts.json
 python3 scripts/range_traversal.py next
 python3 scripts/range_traversal.py record-scan --vmid <golden_vmid> --working-vmid <id> --target <ip> --discover scripts/range_discover.py
-python3 scripts/range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <id> --audit scripts/range_host_audit.py
+python3 scripts/range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <id> --target <ip> --audit scripts/range_host_audit.py
 python3 scripts/range_traversal.py assign-poc --vmid <golden_vmid> --finding <finding_id> --poc-script scripts/range_poc.py [--reverify]
 python3 scripts/range_traversal.py report-poc --vmid <golden_vmid> --finding <finding_id> --poc-script scripts/range_poc.py --result-file <path> [--reverify]
 python3 scripts/range_traversal.py assign-remediate --vmid <golden_vmid> --finding <finding_id> --remediate-script scripts/range_remediate.py [--dry-run]
@@ -212,6 +239,53 @@ Two rules that prevent this entirely:
    fail differently) — or just wait and re-check, rather than sending
    a second mutating call for the same vmid.
 
+## Checking whether a working clone still exists, and recovering if it doesn't
+
+`proxmox_bridge.py`'s `GET /vm/{vmid}/status` is the read-only "does
+this vmid still exist, and what's it doing" check — use it instead of
+guessing from a mutating call's side effects. It returns
+`{"vmid": ..., "exists": false}` for a vmid that's gone, or
+`{"vmid": ..., "exists": true, "status": "running"|"stopped", ...}`
+otherwise.
+
+This exists because of a real gap, found live: an operator manually
+destroyed a working clone directly in Proxmox (outside this bridge,
+outside `range_traversal.py` — so neither one knew it happened).
+`range_traversal.py`'s own state kept recording that host's
+`working_vmid` as real, and there was previously no read-only way to
+check otherwise — the agent fell back to a plain `GET` that doesn't
+exist on this bridge (405), then to reading a `/vm/{vmid}/exec` call's
+error as a proxy signal, which is ambiguous (a fast failure there
+looks the same whether the vmid is genuinely gone or the guest agent
+just isn't up yet).
+
+If `GET /vm/{vmid}/status` confirms a host's working clone is
+genuinely gone (manually destroyed, or destroyed by some other process
+outside this skill's own teardown step), clear the stale state with:
+
+```
+python3 scripts/range_traversal.py reset-host --vmid <golden_vmid> \
+    --reason "working clone manually destroyed in Proxmox outside the sanctioned teardown"
+```
+
+This clears `working_vmid` and resets both scan statuses to
+`not_started` so `next` issues a fresh `clone_and_scan` — it does NOT
+touch any already-recorded finding's status or evidence. Be aware of
+what that implies: if a finding was already `poc_confirmed` (or
+further) before the reset, its evidence was collected against the
+clone that's now gone — worth a second look against the new clone
+rather than assuming it still holds, the same caution a reverify
+banner already applies to pre-remediation audit output elsewhere in
+this skill. Every reset is recorded in that host's `reset_history` in
+state, so `status` shows an audit trail of when and why this happened.
+
+**NEW, UNTESTED**: `GET /vm/{vmid}/status`'s "doesn't exist" detection
+was written from the error text Proxmox returned in a *different* call
+(a start attempt on an already-destroyed vmid), not yet confirmed
+against this exact endpoint called on a genuinely nonexistent vmid.
+Verify the real error text/status code once against a real target
+before trusting the `exists: false` branch.
+
 ## What's genuinely untested here
 
 This whole skill is new, end to end — none of it has been run against
@@ -233,7 +307,7 @@ at once:
    actually match, and specifically check the nmap-XML path separately
    from the stdlib fallback (no service detection at all).
 2. **`range_host_audit.py` alone**, against one working clone — confirm
-   the guest-exec probe succeeds, each check's command actually runs
+   the SSH probe succeeds, each check's command actually runs
    (some, like the RPM query on a Debian host, are EXPECTED to fail —
    that's a per-check failure recorded in `errors`, not a reason to
    distrust the rest), and the output is something you could actually
@@ -262,6 +336,12 @@ at once:
    one host's full lifecycle (both scan phases, both scopes, remediate,
    reverify), and `status`'s summary counts match what actually
    happened.
+7. **`GET /vm/{vmid}/status` and `reset-host`** — against a real
+   target, confirm the status endpoint's `exists: false` branch
+   actually fires for a genuinely destroyed vmid (not just a guess
+   from a different call's error text — see that endpoint's own
+   comment), and that `reset-host` followed by `next` correctly
+   re-issues `clone_and_scan` rather than reusing the stale vmid.
 
 ## Extending `proxmox_bridge.py`'s golden-image guard
 

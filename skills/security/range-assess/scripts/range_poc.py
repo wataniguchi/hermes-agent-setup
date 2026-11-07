@@ -246,10 +246,25 @@ def cmd_report(args):
     log.setdefault(key, []).append({"timestamp": time.time(), "result": result})
     save_log(log)
 
+    # Also save a canonical copy, keyed by WORKING vmid (not golden) since
+    # that's what the log above is keyed by and what a human cross-
+    # referencing /workspace needs to match against it. Confirmed as a real
+    # gap on a live run: the agent is free to name --result-file anything
+    # ("a file of its own choosing", per the prompt), and in practice it
+    # named these after the golden vmid instead — consistent, but at odds
+    # with this log's own key, making the two hard to cross-reference. This
+    # guarantees a predictably-named copy exists regardless of what the
+    # agent actually passed as --result-file (a no-op overwrite if it
+    # already matches).
+    canonical_path = os.path.join("/workspace", f"result_{args.working_vmid}_{args.finding_id}.json")
+    with open(canonical_path, "w") as f:
+        json.dump(result, f, indent=2)
+
     print(json.dumps({
         "reported": True, "finding_id": args.finding_id, "reachable": reachable,
         "method": result.get("method", ""), "evidence": result.get("evidence", ""),
         "attempts_used": len(log[key]), "attempts_remaining": MAX_ATTEMPTS_PER_FINDING - len(log[key]),
+        "canonical_result_file": canonical_path,
     }, indent=2))
 
 

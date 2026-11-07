@@ -457,6 +457,75 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo \
 # Dockerfile has no way to know that in advance.
 RUN useradd -u 501 -m -s /bin/bash hermes
 
+# ---------------------------------------------------------------------------
+# Fixed SSH client identity for outbound connections
+# ---------------------------------------------------------------------------
+# PURPOSE: give this sandbox a STABLE, pre-known public key so the matching
+# public key only ever has to be registered once into the authorized_keys
+# of every host the sandbox needs to reach. Every container created from
+# this image then authenticates with the same known identity, with no
+# per-container key exchange.
+#
+# WHY COPYed IN, NOT GENERATED AT BUILD TIME: a build-time `ssh-keygen`
+# produces a brand-new key on every cache-busted rebuild (which this file
+# explicitly expects to happen as packages accumulate). Every rebuild
+# would then silently invalidate the authorized_keys entries already
+# registered on the target hosts. The keypair is instead generated ONCE
+# on the host by build-sandbox-image.sh (generate-if-missing, so reruns
+# never rotate it) into docker/ssh/, kept there, and COPYed in — so the
+# public key stays "always already known" across arbitrarily many
+# rebuilds and only has to be registered a single time.
+#
+# WHY BOTH hermes AND root: outbound ssh in this sandbox can run either
+# as the default runtime user (hermes, UID 501 — see USER below) OR as
+# root via the passwordless `sudo ssh` configured above. The OpenSSH
+# client requires the private key to be owned by the invoking user and
+# mode 0600, and resolves ~/.ssh from that user's home — so a key in
+# /home/hermes/.ssh is NOT usable by `sudo ssh` and vice versa. Installing
+# the SAME single keypair into both homes means whichever identity makes
+# the connection, it presents the same public key — so you still only
+# register ONE public key on the target hosts regardless of who connects.
+#
+# TRADEOFF (accepted, same spirit as the sudo block above): the private
+# key is baked into an image layer, so anyone who can pull/read this image
+# can authenticate as this sandbox to those hosts. That is acceptable for
+# a disposable, single-purpose local CTF sandbox reaching hosts you
+# control. If this image is ever shared more widely, rotate the keypair
+# (delete docker/ssh/, rebuild) and update the hosts' authorized_keys.
+#
+# UID CAVEAT (same assumption as the rest of this file): the owned-by-
+# hermes perms are correct only while the runtime UID is actually 501. If
+# Hermes ever launches this image with a different host UID, the baked
+# hermes key won't be owned by the invoking user and ssh will refuse it
+# ("UNPROTECTED PRIVATE KEY FILE" / bad owner). The root copy is immune
+# to that (root is root regardless of the --user flag), so `sudo ssh`
+# remains a working fallback in that case; alternatively chown the key in
+# an entrypoint at container start.
+
+# openssh-client provides the ssh/scp binaries themselves — the base
+# image is not guaranteed to ship them.
+# VERIFY: standard Debian package name, but confirm it installs at build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- hermes identity (default runtime user) ---
+RUN install -d -m 0700 -o hermes -g hermes /home/hermes/.ssh
+COPY --chown=hermes:hermes ssh/id_ed25519     /home/hermes/.ssh/id_ed25519
+COPY --chown=hermes:hermes ssh/id_ed25519.pub /home/hermes/.ssh/id_ed25519.pub
+COPY --chown=hermes:hermes ssh/config         /home/hermes/.ssh/config
+RUN chmod 0600 /home/hermes/.ssh/id_ed25519 /home/hermes/.ssh/config \
+    && chmod 0644 /home/hermes/.ssh/id_ed25519.pub
+
+# --- root identity (used via `sudo ssh`) — SAME keypair, so the same
+#     single public key covers both users on the target hosts ---
+RUN install -d -m 0700 /root/.ssh
+COPY ssh/id_ed25519     /root/.ssh/id_ed25519
+COPY ssh/id_ed25519.pub /root/.ssh/id_ed25519.pub
+COPY ssh/config         /root/.ssh/config
+RUN chmod 0600 /root/.ssh/id_ed25519 /root/.ssh/config \
+    && chmod 0644 /root/.ssh/id_ed25519.pub
+
 WORKDIR /workspace
 
 # Defensive blanket fix, added after finding the ilspycmd permission bug
