@@ -4,6 +4,39 @@ Adds [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a second cl
 
 **Assumes:** `local-agent-webui` is already installed and running on this host, with Open WebUI's backend pointed at the same Ollama instance this repo configures.
 
+## Documentation map
+
+This repo's docs are split by what's shared infrastructure versus what's
+built on top of it:
+
+- **`README.md`** (this file) — the base Hermes/Ollama/Docker-sandbox
+  setup, plus the two pieces of infrastructure shared by everything else
+  in the repo: the Proxmox bridge and the isolated Windows analysis VM
+  (§12). Read this first.
+- **[`README_CTF_harness.md`](README_CTF_harness.md)** — a
+  platform-blind traversal engine, operational-resilience/watchdog
+  layer, and shared verification baseline for running Hermes against a
+  problem set autonomously and unattended. Built on top of this file's
+  base setup.
+- **[`README_ksnctf-extension.md`](README_ksnctf-extension.md)** — the
+  ksnctf platform wired into the CTF harness: acquisition, discovery,
+  guarded flag submission.
+- **[`README_range-assess-extension.md`](README_range-assess-extension.md)**
+  — a security-range assessment workflow reusing the CTF harness's
+  state-machine and guardrail patterns against a different kind of
+  target (Proxmox-hosted hosts instead of a CTF platform's problems),
+  and reusing the Proxmox bridge from §12 below.
+- **`CHANGELOG_CTF-harness.md`**, **`CHANGELOG.range-assess-extension.md`**
+  — history of what broke and how it was fixed for each extension above.
+  Not needed to use anything; read only for "why does the code do this?"
+  questions.
+- **[`SPECIFICATION_GAMING_CASE_STUDY.md`](SPECIFICATION_GAMING_CASE_STUDY.md)**
+  — a standalone case-study essay on one incident during CTF-harness
+  development (an agent bypassing a tracking-file guardrail by direct
+  file edit) and why it wasn't "fixed" with a code patch alone. Kept as
+  written, referenced but not restated from
+  [`README_CTF_harness.md`](README_CTF_harness.md).
+
 ## How it fits together
 
 ```
@@ -26,7 +59,7 @@ This section describes the full environment an agent (primary or subagent)
 actually operates in — what it can reach, what it can install, and what's
 deliberately walled off. Worth reading both as a human operator and as
 context for what to expect an agent to already know about its own
-affordances (this section is referenced from the Proxmox skill's own
+affordances (this section is referenced from both extension docs' own
 documentation for exactly that reason).
 
 ```mermaid
@@ -80,7 +113,9 @@ are: (1) the explicit host-directory mounts (`/workspace` read-write,
 reachable), (2) normal internet access for research and package
 installation, and (3) the Proxmox bridge, reachable at
 `host.docker.internal:8811` — a narrow HTTP API, not a general network
-route to anything.
+route to anything. The range-assess extension also reaches the Proxmox
+range's own network directly via Docker host networking — see
+[README_range-assess-extension.md](README_range-assess-extension.md).
 
 **The Windows VM is a completely different trust and capability regime,
 on purpose.** It is a disposable clone of a golden template, on a
@@ -90,8 +125,8 @@ rule, so this holds even if something inside the VM were compromised. Its
 toolkit (Ghidra, x64dbg, Sysinternals, Python, .NET SDK, `ilspycmd`) is
 **fixed at template-build time** — an agent cannot install anything new
 into this VM at runtime; the only way new tools get added is a human
-operator manually rebuilding the golden template (see `README_Proxmox.md`).
-The **only** path in or out of this VM is the bridge's narrow API
+operator manually rebuilding the golden template (§12 below). The
+**only** path in or out of this VM is the bridge's narrow API
 (`analyze_windows_binary.py`'s `start`/`push`/`exec`/`pull`/`decompile`/
 `gui-probe`/`destroy`), which itself never gives the VM a network route —
 it relays through Proxmox's management API and QEMU's guest-agent channel
@@ -103,8 +138,11 @@ that isn't already in the Windows golden template, the Windows VM cannot
 get it — that work either happens in the Linux Docker sandbox instead (if
 the target is Linux/cross-platform and the sandbox's internet + install
 authority can get what's needed), or it requires a human operator to
-rebuild the template. This is a real, current limitation, not an oversight
-to work around inside a task.
+rebuild the template. [README_CTF_harness.md](README_CTF_harness.md)'s
+own key design insight goes further for the CTF use case specifically:
+most binary-analysis work (Ghidra, `ilspycmd`) doesn't need this VM at
+all, since it analyzes a binary as data rather than executing it — the VM
+is reached only when dynamic execution is genuinely required.
 
 **`qwen3.8:27b-96k` is confirmed resident at 21GB** (`ollama ps`: `21 GB, 100% GPU, 98304 context`), with swap usage confirmed minimal at rest (`sysctl vm.swapusage`: ~63MB used of 1GB total — comfortably in the "fine" range this doc's own §5 methodology defines). **Ollama on this machine is configured to cater 1× `qwen3.8:27b-96k` plus 3× `gemma4:e4b`** resident at once, matching `OLLAMA_NUM_PARALLEL=3`/`delegation.max_concurrent_children` below.
 
@@ -119,7 +157,12 @@ to work around inside a task.
 ```
 hermes-agent-setup/
 ├── README.md
-├── README_Proxmox.md          # isolated Windows analysis VM on Proxmox — separate lab, see file for details
+├── README_CTF_harness.md              # platform-blind traversal engine + watchdog layer
+├── README_ksnctf-extension.md         # ksnctf wired into the CTF harness
+├── README_range-assess-extension.md   # range assessment wired into the CTF harness
+├── CHANGELOG_CTF-harness.md
+├── CHANGELOG.range-assess-extension.md
+├── SPECIFICATION_GAMING_CASE_STUDY.md # standalone case study — see README_CTF_harness.md
 ├── config/
 │   ├── config.yaml            # Hermes model + delegation + discord config
 │   ├── .env.example           # curated subset — real keys; Discord keys are written by `hermes gateway setup`, not hand-typed
@@ -130,18 +173,32 @@ hermes-agent-setup/
 ├── proxmox/
 │   ├── proxmox_bridge.py      # FastAPI service: Proxmox VM lifecycle + guest-exec, exposed to the sandbox via host.docker.internal:8811
 │   ├── requirements.txt       # fastapi/uvicorn/requests — installed into proxmox/.venv by start-proxmox-bridge.sh
-│   └── .env.example           # curated subset — real values go in proxmox/.env (gitignored), see README_Proxmox.md
+│   └── .env.example           # curated subset — real values go in proxmox/.env (gitignored), see §12 below
 ├── skills/
 │   └── security/
-│       └── windows-binary-analysis/
-│           ├── SKILL.md           # copied into ~/.hermes/skills/security/ — see README_Proxmox.md
-│           └── scripts/
-│               └── analyze_windows_binary.py   # start/push/exec/pull/destroy CLI, wraps the Proxmox bridge
+│       ├── windows-binary-analysis/   # start/push/exec/pull/decompile/destroy CLI, wraps the Proxmox bridge — see §12
+│       │   ├── SKILL.md
+│       │   └── scripts/
+│       │       └── analyze_windows_binary.py
+│       ├── binary-static-analysis/     # sandbox-only static analysis (Ghidra/ilspycmd), platform-blind — see README_CTF_harness.md
+│       ├── ksnctf-fetch/                # see README_ksnctf-extension.md
+│       ├── ksnctf-discover/             # see README_ksnctf-extension.md
+│       ├── ksnctf-submit/               # see README_ksnctf-extension.md
+│       ├── ctf-solver/                  # see README_CTF_harness.md / README_ksnctf-extension.md
+│       └── range-assess/                # see README_range-assess-extension.md
 └── scripts/
-    ├── setup-ollama-models.sh     # checks Ollama version, pulls both models
-    ├── build-sandbox-image.sh     # builds hermes-sandbox:latest from docker/hermes-sandbox.Dockerfile
-    ├── verify-setup.sh            # runs the full verification checklist
-    └── start-proxmox-bridge.sh    # sets up proxmox/.venv if needed, launches the Proxmox bridge on 127.0.0.1:8811
+    ├── setup-ollama-models.sh         # checks Ollama version, pulls both models
+    ├── build-sandbox-image.sh         # builds hermes-sandbox:latest from docker/hermes-sandbox.Dockerfile
+    ├── verify-setup.sh                # runs the full verification checklist
+    ├── start-proxmox-bridge.sh        # sets up proxmox/.venv if needed, launches the Proxmox bridge on 127.0.0.1:8811
+    ├── ctf-sweep-watchdog.sh          # see README_CTF_harness.md
+    ├── ctf-sweep-monitor.sh           # see README_CTF_harness.md
+    ├── ctf-sweep-backup.sh            # see README_CTF_harness.md
+    ├── distill_progress_note.py       # see README_CTF_harness.md
+    ├── check-deployment-drift.sh      # see README_CTF_harness.md
+    ├── ctf-sweep-init-prompt.txt / ctf-sweep-resume-prompt.txt
+    ├── range-sweep-watchdog.sh        # see README_range-assess-extension.md
+    └── range-sweep-init-prompt.txt / range-sweep-resume-prompt.txt
 ```
 
 No custom LaunchAgents ship from this repo — Ollama is managed via `brew services` (its own Homebrew-installed plist), and the Hermes gateway manages its own launchd service (`hermes gateway start`/`setup`). Both are covered in §7 and §8 below.
@@ -410,19 +467,327 @@ Fill in real host paths before use — the ones in `config/config.yaml` are plac
     docker exec -u root <container_id> pip install pypdf pdfplumber
     ```
 
+**SSH keypair baked into the sandbox image**: `docker/hermes-sandbox.Dockerfile` also bakes in an SSH keypair under both `/home/hermes/.ssh` and `/root/.ssh` (the same key, giving `sudo ssh` access from either account). This is the client-side half of the credential pair behind the range-assess extension's SSH-based local host audit (see [README_range-assess-extension.md](README_range-assess-extension.md)) — the matching public key is authorized on the server side, on every range target host. It's recorded here, not only in that extension's own doc, because it's part of the shared sandbox image every skill runs in, not something range-assess introduces on its own. As with the rest of this image, build-tested status matters: see the Dockerfile's own header for its current confirmed-vs-untested caveats.
+
 Leaf subagents (the kind `delegate_task` spawns by default) can't call Hermes's `memory` tool directly. The natural pattern for turning read documents into persistent knowledge: have the subagent read and summarize, return the summary to the primary, and let the primary decide what's worth writing to memory — this is also what keeps large raw documents out of the main context window in the first place.
 
-### 12. Optional: isolated Windows analysis VM (Proxmox)
+### 12. Isolated Windows analysis VM (Proxmox)
 
-For CTF/security work needing a real Windows environment — Docker here only
-runs Linux containers, so Windows PE analysis, Windows-targeted pwn
+For CTF/security work needing a real Windows environment — Docker here
+only runs Linux containers, so Windows PE analysis, Windows-targeted pwn
 challenges, and Windows malware triage can't run in the sandbox above.
-Adds an air-gapped Windows VM on a separate Proxmox host, driven by Hermes
-through a small HTTP bridge and a `windows-binary-analysis` skill.
+Adds an air-gapped Windows VM on a separate Proxmox host, driven by
+Hermes through a small HTTP bridge and a `windows-binary-analysis` skill.
 
-**Not needed for the rest of this repo to work** — entirely separate from
-Ollama/Hermes/the Docker sandbox above. See
-**[README_Proxmox.md](README_Proxmox.md)** for the full setup.
+**Not needed for the rest of this repo to work** — entirely separate
+from Ollama/Hermes/the Docker sandbox above. The range-assess extension
+also depends on this section's Proxmox bridge (for its own, Linux/Windows
+range hosts rather than the Windows analysis VM specifically) — see
+[README_range-assess-extension.md](README_range-assess-extension.md).
+
+**Status:** golden template (`win10-golden`, JIS-layout Windows 10, full
+toolkit) built and snapshotted. Bridge service (`proxmox/proxmox_bridge.py`)
+proven end-to-end: clone → start → guest-exec → destroy, tested both locally
+on the Proxmox host and cross-machine from the Mac Studio.
+
+#### Hardware
+
+| Component | Spec |
+|---|---|
+| Host | iMac Retina 5K, 27", Late 2015 (no T2 chip — no Secure Boot/external-media restrictions apply) |
+| CPU | 3.2GHz quad-core Intel Core i5 |
+| RAM | 24GB 1600MHz DDR3 |
+| Hypervisor | Proxmox VE (bare metal) |
+
+#### Storage architecture
+
+Three tiers, split by write pattern. The HDD is a **5400 RPM SMR** drive
+(Seagate ST8000DM004) — tolerates sequential/read-mostly access well, degrades
+badly under sustained random writes. This is why templates and working copies
+live on different storage.
+
+| Tier | Device | Proxmox storage ID | Type | Role |
+|---|---|---|---|---|
+| Host | Internal 128GB SSD | `local` | dir | Proxmox OS, ISOs, config only |
+| Hot | External 240GB USB SSD (Buffalo, UAS) | `hot-ssd` | LVM-thin | Active/working VM disks — anything under snapshot/rollback churn |
+| Cold | Internal 8TB HDD (SMR) | `vmdata` | ZFS pool | Golden templates (write-once, read-many), samples, backups |
+
+Per-exercise workflow:
+
+```bash
+qm clone 9000 <new-id> --full 1 --storage hot-ssd --name exercise-<new-id>
+# ... run the exercise, snapshot/rollback freely on hot-ssd ...
+qm stop <new-id>
+qm destroy <new-id>   # discard when done — no cumulative drift
+```
+
+**Full clones (not linked)** are required here since template (`vmdata`) and
+working copy (`hot-ssd`) live on different storage backends. Expect the clone
+itself to take a while — observed **30-60+ minutes for a 64GB template**
+copying off the SMR source, even though it's the drive's best-case sequential
+access pattern. This is why `proxmox_bridge.py`'s task-wait timeout is set to
+2 hours, not a shorter default.
+
+#### Network architecture
+
+Two bridges, kept structurally separate — `vmbr1` has **no physical uplink
+at all**, not just a firewall rule:
+
+```
+# /etc/network/interfaces
+auto vmbr1
+iface vmbr1 inet manual
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+```
+
+| Bridge | Attached to | Purpose |
+|---|---|---|
+| `vmbr0` | Physical NIC | Proxmox host management (web UI, API, SSH) |
+| `vmbr1` | Nothing | Isolated network for analysis VMs — no route to LAN or internet |
+
+Any VM analyzing untrusted binaries or CTF material attaches to `vmbr1` only.
+(The range-assess extension's own golden images use a different, routed
+network — see [README_range-assess-extension.md](README_range-assess-extension.md).)
+
+#### Golden template: `win10-golden` (VMID 9000)
+
+**Japanese-edition Windows 10 22H2 x64** — not English + language pack. An
+earlier attempt to retrofit JIS keyboard support onto an English install via
+registry overrides, driver swaps, and offline `.cab` language packs all
+failed to stick reliably; the native JP-edition ISO ships JIS as the default,
+no retrofitting needed. If future templates don't need Japanese input, an
+English ISO is simpler — this detour is specific to this operator's needs.
+
+```bash
+qm create 9000 \
+  --name win10-golden \
+  --memory 8192 --cores 4 --cpu host \
+  --machine q35 --bios ovmf \
+  --efidisk0 vmdata:0,efitype=4m,pre-enrolled-keys=0 \
+  --scsihw virtio-scsi-pci \
+  --scsi0 vmdata:64,cache=writeback,discard=on \
+  --ide2 local:iso/<Windows-JP-ISO-filename>.iso,media=cdrom \
+  --ide3 local:iso/virtio-win-<version>.iso,media=cdrom \
+  --net0 virtio,bridge=vmbr1 \
+  --vga std \
+  --agent enabled=1,fstrim_cloned_disks=1 \
+  --ostype win10
+qm set 9000 --boot order=ide2;scsi0;net0   # ide2 first so a blank disk boots the installer
+```
+
+**q35 IDE limitation:** only two IDE optical slots are actually usable
+(whatever's assigned to `ide2`/`ide3`) — a third (`ide0`, etc.) is silently
+accepted into the config but never presents a device to the guest. Reuse
+`ide2`/`ide3` for later media swaps (e.g. toolkit delivery ISO) rather than
+adding new slots.
+
+**OVMF boot-entry quirk:** a freshly created VM with an empty `scsi0` can
+show `BdsDxe: failed to start Boot0002 "UEFI QEMU DVD-ROM..."` and fall
+through to the interactive boot-device picker even with a valid, correctly
+attached ISO. In practice this resolved itself once `scsi0` had no competing
+bootable disk to fall back to — if it recurs, **Boot Maintenance Manager →
+Boot From File → `\EFI\BOOT\BOOTX64.EFI`** boots directly, bypassing the
+stale entry.
+
+Toolkit installed via one-shot ISO transfer (build on the Proxmox host,
+attach as temporary CD-ROM, copy in, detach):
+
+```bash
+genisoimage -o /var/lib/vz/template/iso/toolkit.iso -J -R /path/to/staged/installers
+qm set 9000 --ide2 local:iso/toolkit.iso,media=cdrom
+# install inside guest, then:
+qm set 9000 --delete ide2
+```
+
+| Tool | Notes |
+|---|---|
+| Sysinternals Suite | Portable, no installer. **Accept each tool's EULA once interactively before snapshotting** — it's a blocking modal that would hang unattended `guest-exec` calls otherwise |
+| x64dbg (snapshot build) | Portable. Confirm Windows Defender isn't flagging it before snapshotting (unsigned-binary heuristic false positives happen occasionally) |
+| PE-bear | Portable; vs17 build needs VC++ 2015-2022 Redistributable installed alongside it |
+| Ghidra | Needs a JDK first (Temurin/Eclipse Adoptium, matching whatever version the specific Ghidra release states) — **the release zip extracts with an extra top-level folder** (`ghidra_X.X_PUBLIC/`); move contents up one level or `ghidraRun.bat` won't be where expected. **Does not handle .NET/MSIL binaries well** — use ilspycmd instead for those (see below). **For scripting: use PyGhidra as a plain Python package, not `analyzeHeadless.bat -postScript`.** Ghidra 12.x's classic `analyzeHeadless -postScript some.py` path is genuinely broken in practice — `.py` scripts default to PyGhidra's runtime, which isn't bootstrapped for headless use, and `# @runtime Jython` just hits a different error since the Jython extension isn't installed either. The actual fix, confirmed working: install the `pyghidra` Python package **offline** using the wheel Ghidra ships with itself — `python -m pip install --no-index -f C:\Tools\ghidra\Ghidra\Features\PyGhidra\pypkg\dist pyghidra` — then write plain Python scripts that `import pyghidra; pyghidra.start(); with pyghidra.open_program(path) as flat_api: ...` and run them directly via `python.exe`, never through `analyzeHeadless.bat` at all. See the skill's `pyghidra_tool.py` and the `ghidra-inventory`/`ghidra-decompile` subcommands |
+| .NET SDK + ilspycmd | For decompiling .NET (MSIL/CIL) binaries back to readable C# — see the `decompile` skill subcommand. Install the .NET SDK (not just the runtime) via the offline installer, then `dotnet tool install --global ilspycmd --tool-path C:\Tools\ilspy` (use `--tool-path`, not a plain `--global` install — the default global-tools location is under the per-user profile, which SYSTEM-context `guest-exec` calls can't see, same PATH pitfall as Python earlier). Add `C:\Tools\ilspy` to the machine-wide PATH |
+| Python | Install **for all users**, not per-user — Hermes's later `guest-exec` calls run in the **SYSTEM** account context, which never sees a per-user `PATH` entry. `python-3.13.15-amd64.exe /passive InstallAllUsers=1 PrependPath=1` |
+
+All tool directories added to the **machine-wide** `Path` (System variables,
+not User variables) — same SYSTEM-context reasoning as Python above.
+
+**Guest agent must be confirmed working before snapshotting** — this is what
+`proxmox_bridge.py` depends on entirely:
+
+```bash
+qm agent 9000 ping
+qm agent 9000 get-osinfo   # should return real Windows version info, not an error
+```
+
+If `qm config 9000 | grep agent` shows `enabled=1` but the guest doesn't
+respond, a **full VM restart** (`qm shutdown` + `qm start`, not a
+Windows-side reboot) is required — this is a QEMU launch-time device, not
+hot-pluggable.
+
+Once confirmed and toolkit installed:
+
+```bash
+qm shutdown 9000
+qm snapshot 9000 clean-tooled
+```
+
+**`ide3` (the virtio-win reference) must be deliberately KEPT on the golden
+template — do not delete it, even though it looks like leftover cruft from
+template build.** Its presence as an *existing device* is required
+infrastructure: the Hermes skill's large-file transfer path
+(`analyze_windows_binary.py`'s ISO-attach mechanism) works by swapping
+`ide3`'s media on a running clone, which is instant and reliable — but
+QEMU does not hotplug a brand-new IDE device into a running VM under any
+circumstances, confirmed by direct testing. If `ide3` doesn't exist on a
+clone, the large-file push path breaks with no new drive letter ever
+appearing, no matter how long you wait. Only `ide2` (the Windows installer
+reference) should be deleted before the final snapshot — see the toolkit
+section above.
+
+#### Bridge service (`proxmox/proxmox_bridge.py`)
+
+Runs on the **Mac Studio**, not the Proxmox host — Hermes's Docker sandbox
+reaches it via `host.docker.internal:8811`. Two channels to Proxmox, kept
+deliberately separate:
+
+- **VM lifecycle** (clone/start/stop/snapshot/rollback/destroy) → Proxmox
+  REST API, authenticated via a scoped API token
+- **In-guest exec + file transfer** → QEMU Guest Agent, relayed through
+  Proxmox's `/agent/*` endpoints over virtio-serial — **never** the guest's
+  own network interface, which stays air-gapped on `vmbr1` throughout
+
+##### One-time Proxmox-side setup
+
+Create a scoped token — **do not reuse `root@pam`**:
+
+```bash
+pveum user add hermes-bridge@pve
+pveum aclmod / -user hermes-bridge@pve -role PVEVMAdmin
+pveum user token add hermes-bridge@pve bridge-token --privsep 0
+```
+
+The `value` field printed by the last command is `PVE_TOKEN_SECRET` —
+**shown once, not retrievable afterward**, only regeneratable.
+
+**`PVEVMAdmin` at `/` is not sufficient by itself** — three additional grants
+were needed before a clone actually succeeded, each surfaced one at a time as
+a separate `403`:
+
+```bash
+# Datastore.AllocateSpace — needed on clone source/destination
+pveum aclmod /storage/hot-ssd -user hermes-bridge@pve -role PVEDatastoreUser
+pveum aclmod /storage/vmdata  -user hermes-bridge@pve -role PVEDatastoreUser
+
+# Datastore.AllocateTemplate — a distinct, more specific privilege than
+# AllocateSpace, required for /storage/upload (the ISO-attach large-file
+# transfer path writes here). PVEDatastoreUser does NOT include this —
+# needs the broader PVEDatastoreAdmin role on this one storage pool.
+pveum aclmod /storage/local -user hermes-bridge@pve -role PVEDatastoreAdmin
+
+# SDN.Use — PVEVMAdmin does not carry this privilege under any path;
+# needs a dedicated role
+pveum role add SDNUser -privs "SDN.Use"
+pveum aclmod /sdn/zones -user hermes-bridge@pve -role SDNUser
+```
+
+Confirm the final ACL set with `pveum acl list` before moving on.
+
+**Firewall — restrict who can reach the API at all:** Datacenter → Firewall
+→ allow TCP/8006 from the Mac Studio's IP only, default-drop otherwise. Do
+this before running the bridge against anything but `localhost`.
+
+##### Running it
+
+```bash
+cp proxmox/.env.example proxmox/.env
+# edit proxmox/.env — real PVE_HOST, PVE_TOKEN_SECRET, etc.
+./scripts/start-proxmox-bridge.sh
+```
+
+##### Verifying end-to-end
+
+```bash
+curl -X POST http://127.0.0.1:8811/vm/clone \
+  -H "Content-Type: application/json" \
+  -d '{"template_vmid": 9000, "new_vmid": 9101, "name": "bridge-test"}'
+# expect a long wait — see clone-duration note above
+
+curl -X POST http://127.0.0.1:8811/vm/9101/start
+curl -X POST http://127.0.0.1:8811/vm/9101/exec \
+  -H "Content-Type: application/json" \
+  -d '{"command": ["cmd", "/c", "where", "x64dbg.exe"]}'
+curl -X DELETE http://127.0.0.1:8811/vm/9101   # auto-stops first if still running
+```
+
+##### Concurrency (multiple Hermes subagents, one shared VM)
+
+Multiple subagents calling `exec`/`file` concurrently against **the same
+`vmid`** is safe — each `/vm/{vmid}/exec` call spawns an independent
+QEMU Guest Agent process, and uvicorn handles each request in its own
+thread, so nothing in the bridge serializes concurrent calls against one
+vmid. The primary should `clone`/`start` once and share that `vmid` with
+subagents — never have each subagent clone its own VM: cost multiplies, and
+concurrent clones from the same SMR source likely make each other slower,
+not just duplicate the 30-60 min wait.
+
+**Known gap:** the skill script's default vmid picker
+(`9100 + time.time() % 400`) has no collision check — fine for one shared
+vmid across subagents of a single task, but two independent analysis
+*sessions* started around the same moment could theoretically collide.
+Pass an explicit `--vmid` if running more than one session concurrently.
+
+#### Open items
+
+- [x] Wire the bridge into an actual Hermes skill — `skills/security/windows-binary-analysis/`
+- [x] Test `/vm/{vmid}/file` write/read endpoints directly — confirmed working
+      both directions, including binary content; read side requires decoding
+      the `content` field as `latin-1` (see troubleshooting table below)
+- [x] Confirm `host.docker.internal:8811` is reachable from inside a running
+      `hermes-sandbox` container — verified via `curl -s
+      http://host.docker.internal:8811/openapi.json` returning real JSON
+- [ ] Consider a second golden template for Linux-based pwn challenges,
+      also on `vmdata`, also cloned to `hot-ssd` per exercise
+- [ ] Consider pre-cloning a small standby pool of ready VMs to avoid the
+      30-60 min clone wait sitting in the critical path of every exercise
+- [x] Split static (Ghidra/ilspycmd) analysis out of this VM's dependency
+      entirely — done via the `binary-static-analysis` skill, which runs
+      entirely in the Docker sandbox with no Proxmox round-trip; this VM
+      (via `windows-binary-analysis`) is now narrowed to genuinely
+      VM-dependent operations only (start/push/exec/gui-probe). See
+      [README_CTF_harness.md](README_CTF_harness.md#the-key-design-insight)
+
+#### First real use
+
+Ask Hermes (chat or Discord) something like: *"There's a Windows pwn
+challenge binary at `/workspace/samples/chall.exe` — analyze it in the
+isolated VM and tell me what you find."* The `windows-binary-analysis` skill
+should trigger automatically based on its description; it'll warn you about
+the clone wait before starting.
+
+#### Proxmox/Windows-VM troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| OVMF console shows `BdsDxe: failed to start ... DVD-ROM` on a fresh VM, falls to boot-device picker | Stale/generic boot entry, not a real device/ISO problem | Boot Maintenance Manager → Boot From File → `\EFI\BOOT\BOOTX64.EFI`; resolves once the OS is actually installed |
+| Windows installer says "No signed device drivers were found" loading VirtIO SCSI driver | Browsed to the wrong folder depth | Path must be exactly `\vioscsi\w10\amd64`, not a level above |
+| Attaching a third install-media ISO on a q35 VM silently does nothing | q35 only exposes 2 usable IDE optical slots | Reuse existing `ide2`/`ide3`, don't add `ide0`/`ide1` for optical media |
+| `where <tool>.exe` fails inside guest even after `setx ... /M` | `setx` (or the modern Settings-app language/keyboard flow) needs internet in some code paths, or a stale environment in an already-running guest-agent service | For PATH specifically: edit via System Properties → Environment Variables → **System variables** GUI directly, or confirm with `reg query "HKLM\SYSTEM\...\Environment" /v Path` before assuming a failure |
+| `qm agent <vmid> ping` returns "No QEMU guest agent configured" | `--agent enabled=1` not set, or set but VM not restarted | `qm set <vmid> --agent enabled=1`, then full `qm shutdown`/`qm start` — config-only changes to hardware need a real relaunch, not a guest-side reboot |
+| Bridge clone call returns `403 Datastore.AllocateSpace` | Token's role doesn't include storage allocation | `pveum aclmod /storage/<name> -user hermes-bridge@pve -role PVEDatastoreUser` on both source and destination storage |
+| Bridge clone call returns `403 SDN.Use` even after granting `PVEVMAdmin` on the SDN path | `PVEVMAdmin` doesn't carry `SDN.Use` under any path — it's simply not in that role | `pveum role add SDNUser -privs "SDN.Use"` then `pveum aclmod /sdn/zones -user hermes-bridge@pve -role SDNUser` |
+| Bridge `exec` call fails with `Failed to execute child process (No such file or directory)` | Command list was joined into one string before sending — Proxmox's `/agent/exec` expects a repeated array parameter, not a single joined string | Already fixed in `proxmox_bridge.py` — send `[("command", part) for part in command_list]`, not `" ".join(...)` |
+| Bridge `exec` call 500s with `binascii.Error: Incorrect padding` | Script attempted to base64-decode `out-data`, but Proxmox's API already returns it as plain decoded text | Already fixed in `proxmox_bridge.py` — use `status.get("out-data")` directly |
+| Bridge `DELETE /vm/{vmid}` fails with "VM is running - destroy failed" | Proxmox refuses to destroy a running VM | Already fixed in `proxmox_bridge.py` — destroy endpoint auto-stops first if needed |
+| `sc stop QEMU-GA & sc start QEMU-GA` via `qm guest exec` fails with `Agent error: PID ... does not exist` | **Fundamental QEMU Guest Agent limitation, not fixable in code**: a command that stops the agent service, issued *through that same agent*, kills the channel before it can complete or report back — there is no way to safely restart QGA remotely via guest-exec | Never attempt to restart the guest agent service via `guest exec`. Use a full VM restart instead whenever the guest environment needs to pick up something the running agent process cached at its own startup (e.g. a PATH change) — `qm shutdown 9000` (or `qm stop` if shutdown also fails to respond) then `qm start 9000`, then `qm agent 9000 ping` until it responds |
+| Attaching a payload ISO to `ide2` via the bridge never becomes visible in the guest — no new drive letter appears, no matter how long you wait, even after a forced reboot | **Confirmed via direct manual testing**: QEMU does not hotplug a brand-new IDE device into a running VM at all — not a timing issue, a hard limitation. `ide2` doesn't exist as a device on any clone (deliberately deleted from the golden template before the final snapshot, see the toolkit section above), so attaching to it hits this non-hotpluggable "new device" case every time | Use `ide3` instead — it exists as a device on every clone because the golden template deliberately keeps it (see the golden-template section above — do not delete it). **Swapping media on an existing device is instant and reliable**, confirmed by direct testing. Fixed in `proxmox_bridge.py` (default `ide_slot` changed to `ide3`) and `analyze_windows_binary.py` (reboot cycle and letter-diffing removed entirely, no longer needed) |
+| `/storage/upload` (from the ISO-attach large-file path) fails with `requests.exceptions.ConnectionError: RemoteDisconnected` — no HTTP status, connection just dies mid-request | Missing `Datastore.AllocateTemplate` on `/storage/local` specifically — this is a distinct, more specific privilege than `Datastore.AllocateSpace`, not covered by `PVEDatastoreUser`. pveproxy's own access log shows `403` for the upload, but the client never sees it as a clean error because pveproxy closes the connection mid-multipart-stream rather than returning a normal response body | `pveum aclmod /storage/local -user hermes-bridge@pve -role PVEDatastoreAdmin` (a superset role that includes `Datastore.AllocateTemplate`). **Diagnostic tip:** when a bridge call fails with a bare connection-reset and no response body, reproduce with a direct `curl` carrying the same token — unlike the bridge's own error handling, `curl` will show you Proxmox's actual permission-check message (`tail -20` on `curl -v` output), which is far more specific than what makes it back through a dropped connection |
+| `GET /vm/{vmid}/file` response's `content` field doesn't look like the original bytes for binary files | Proxmox's `/agent/file-read` returns bytes mapped 1:1 onto Unicode codepoints (Latin-1/ISO-8859-1), not UTF-8 and not base64 despite QEMU GA's own spec saying base64 | Verified with a 256-byte all-byte-values test file + SHA256 comparison — decode the `content` field as **`latin-1`**, not `utf-8`: `raw_bytes = response_json["content"].encode("latin-1")` reconstructs the original file exactly |
+| A full clone from `vmdata` (HDD) to `hot-ssd` takes 30-60+ minutes | Expected — SMR source, full (not linked) clone across different storage backends, copies the entire provisioned 64GB regardless of actual used data | Not a bug; `proxmox_bridge.py`'s task-wait timeout is set to 7200s to accommodate this |
+| Skill's `start` times out at "Waiting for guest agent" even though the clone itself succeeded | Windows's first boot after a fresh clone can take longer than the original 300s wait — observed in practice, not just theoretically possible | `analyze_windows_binary.py`'s `wait_for_guest` timeout raised to 600s. If it still times out, check `qm status <vmid>` / the console directly before assuming something's broken |
+| `POST /vm/{vmid}/file` (pushing a sample) returns `400 Bad Request` for any file over roughly 45KB | Proxmox's `agent/file-write` API validates its `content` parameter against a **hardcoded 61,440-byte limit**, independent of the general POST body size limit — confirmed on Proxmox's own support forum, not fixable from this bridge's side. Real CTF binaries routinely exceed this | `analyze_windows_binary.py`'s `push`/`start` auto-detect file size and route anything over 40,000 bytes through an ISO-attach path instead (`/storage/upload` + `/vm/{vmid}/cdrom`) — builds a real ISO9660 image via macOS's `hdiutil`, uploads it through Proxmox's storage-upload endpoint (no size ceiling), attaches as CD-ROM on `ide2`, has the guest copy the file off (auto-detecting the drive letter, not assuming `D:`), then detaches and cleans up |
+| `/storage/upload` returns `400 No such file on bridge host: /workspace/...` | The script initially passed a **path** to the bridge for large files — but the bridge runs on the Mac Studio host, and `host.docker.internal` is a network route, not a filesystem bridge. The bridge process has no visibility into the sandbox container's filesystem, so a container-side path is meaningless to it | Fixed: `/storage/upload` now takes file **content** (base64), same pattern as the small-file `/vm/{vmid}/file` path. The helper script reads the file itself (it runs inside the container, where the file IS readable) and sends the bytes — no path is ever passed across the host/container boundary |
 
 ## Persistent storage layout
 
@@ -441,7 +806,7 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 ## Troubleshooting
 
 | Symptom                                                                                                                                   | Likely cause                                                                                                                                                                                             | Fix                                                                                                                                                                                         |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Hermes refuses to initialize, context error                                                                                               | `model.context_length` should be auto-detected, not set                                                                                                                                                  | Leave `context_length` unset in `config.yaml`; only set it manually if auto-detection is wrong for this endpoint                                                                            |
 | Discord bot fails to connect: `discord.errors.PrivilegedIntentsRequired` in `gateway.error.log`                                           | One or more of the three privileged intents (Presence, Server Members, Message Content) isn't enabled in the Developer Portal                                                                            | Enable all three in the Bot tab, confirm it saved, then `hermes gateway restart`                                                                                                            |
 | Discord bot online and connected, but never replies to messages                                                                           | `discord.require_mention: true` is the default — plain messages without an @mention are silently ignored, by design                                                                                      | @mention the bot explicitly, or set `discord.free_response_channels` for a channel where you don't want to                                                                                  |
@@ -456,15 +821,18 @@ For multi-agent instances to *share* memory/context, point Hermes at a pluggable
 | Sandboxed path request in Hermes Desktop reports "not found," but the same request via `hermes chat` or Discord works fine                | Desktop doesn't reliably apply `terminal.backend: docker` — falls back to running on the host with no error shown (§10)                                                                                  | Use `hermes chat` or the Discord gateway for anything needing the Docker sandbox, until this is fixed upstream                                                                              |
 | Primary agent goes silent / no GPU activity right after announcing a tool call or delegation, or degenerates into repeated garbage tokens | Confirmed, with `gemma4:26b` as primary, on two different MLX-based servers (`mlx_lm.server`, `mlx_vlm.server`); not reproduced on Ollama with `gpt-oss:120b-64k` as primary. Not specifically re-tested since switching to `qwen3.8:27b-96k` — no reports of it so far. | If this recurs, capture the exact prompt/conditions and treat as a new report — this specific pattern was tied to the old primary/backend combination, not something expected to carry over |
 
-For issues specific to the Proxmox Windows analysis lab (§12), see
-[README_Proxmox.md](README_Proxmox.md)'s own troubleshooting table instead.
+For issues specific to the Proxmox Windows analysis lab, see §12's own
+troubleshooting table above.
 
 ## Security notes
 
 - `.env` is gitignored (see below) — never commit it. `.env.example` in this repo has placeholders only. This also covers `proxmox/.env` — the gitignore pattern matches any `.env` file regardless of directory.
 - If you later expose the Discord bot beyond yourself (teammates/community), create a dedicated Hermes profile for it rather than sharing your personal CLI profile — isolates its skills, memory, and browser sessions.
 - If you configure a cloud fallback via `config.yaml`'s `fallback_model:` block (commented out by default — see the bottom of `config/config.yaml`), traffic can leave the machine when local models fail repeatedly — set spend limits on that provider's API key if cost matters. Not currently enabled in this repo's `config.yaml`.
-- See [README_Proxmox.md](README_Proxmox.md)'s own Security notes for anything specific to the isolated Windows VM lab (§12).
+- The `hermes-bridge@pve` token (§12) is scoped to VM lifecycle + the two specific storage pools + SDN zones — not `root@pam`, not a broader admin role.
+- The Proxmox API (port 8006) should be firewalled to the Mac Studio's IP only, same principle as `.env` never leaving the host.
+- Analysis VMs on `vmbr1` never have a network path to anything — `vmbr1` has no physical uplink, so this holds even if the bridge script itself were compromised.
+- If a "Windows binary" assignment starts looking like real malware rather than a scoped CTF challenge (persistence attempts, anti-VM evasion, unexpected outbound attempts even though the network is cut), stop, snapshot for offline analysis, and don't let automation continue unsupervised.
 
 ## `.gitignore` (add to repo root)
 
