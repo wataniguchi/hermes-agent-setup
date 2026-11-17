@@ -74,6 +74,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # manual .jar install for a largely superseded tool.
     # --- Network ---
     netcat-openbsd \
+    nmap \
+    # Added after a real gap was found: nmap was never in this image at
+    # all (not a stale-container issue like the other tools above — it
+    # genuinely was never installed). range_discover.py has had a
+    # nmap-or-stdlib-TCP-connect fallback since it was written, but the
+    # fallback path (no service/version detection, port open/closed
+    # only) was the ONLY path ever exercised as a result — including
+    # the entire first 21-host sweep. Its own module docstring already
+    # flagged this: "the nmap XML parsing path has not been exercised
+    # against this range's... check with your own nmap run by hand
+    # before trusting this." Rebuild and recreate the persistent sandbox
+    # container after this change (see README.md §11) — adding it here
+    # does nothing to an already-running container.
     # --- Forensics / steganography ---
     binwalk \
     libimage-exiftool-perl \

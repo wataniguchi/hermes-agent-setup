@@ -27,9 +27,30 @@ stages against ONE host and ONE low-risk finding before trusting this
 across the range — see the skill's SKILL.md for a suggested validation
 order.
 
-Per-host lifecycle this engine tracks (processed one host at a time, in
-config order — a host's findings are all walked to a terminal status,
-or to review_needed, before the NEXT host's clone_and_scan is issued):
+Per-host lifecycle this engine tracks. Two revisions from the original
+design, both found necessary from a real 21-host run:
+
+(1) `remediation_planned` (a report-remediate call where `applied` came
+back false) now gets real follow-up instead of being silently skipped
+forever: `next`/`next-batch` keep re-offering it as `assign_remediate`
+(a retry) up to MAX_REMEDIATION_ATTEMPTS, after which — or immediately,
+if the agent reported `needs_operator_decision: true` — it's surfaced
+as a non-blocking review item instead of just vanishing.
+
+(2) A finding with no further automatic path (`reverify_failed`, or
+`remediation_planned` past its retry cap) no longer blocks the REST OF
+THE SWEEP. The original design walked one host's findings to a terminal
+status (or to review_needed) before ever issuing the next host's
+clone_and_scan — which meant a single stuck finding on host 3 would
+permanently halt hosts 4 through 21, discovered only because sequential
+processing happened to get 25/25 reverifies right so far, by luck, not
+by design. `next`/`next-batch` now collect review-needed findings
+separately and keep advancing through every other host's real work;
+review items are reported once nothing else is left to do, not instead
+of it. `resolve-review` is the only way to move a finding off
+`reverify_failed`/stalled-`remediation_planned` — same principle
+AGENTS.md's standing rules state for `.ctf_traversal_state.json`:
+nothing but this script's own commands touches a tracked status.
 
     network_scan_status: not_started -> scanned (or scan_failed)
     local_audit_status:  not_started -> audited (or audit_failed)
@@ -37,12 +58,30 @@ or to review_needed, before the NEXT host's clone_and_scan is issued):
 
     per finding:
         discovered -> poc_confirmed -> remediation_planned -> remediation_applied -> reverified_closed
-                   |-> poc_not_reachable                                          |-> reverify_failed (-> review_needed)
-                   |-> poc_inconclusive
+                   |-> poc_not_reachable           (retried in place, up to       |-> reverify_failed
+                   |-> poc_inconclusive              MAX_REMEDIATION_ATTEMPTS)          |
+                                                                              resolve-review
+                                                                                  |-> risk_accepted
+                                                                                  |-> closed_manually
+                                                                                  |-> back to poc_confirmed /
+                                                                                      remediation_planned (retry)
+
+LEASING, for concurrent/delegated use: every action `next`/`next-batch`
+hands out is claimed (in state["claims"], keyed by "<vmid>:host" for
+the two per-host prerequisite actions or "<vmid>:<finding_id>" for a
+finding-level one) so a second concurrent caller is offered something
+else instead of colliding on the same work. A claim expires after
+ACTION_LEASE_TIMEOUT_SECONDS if nothing ever reports back (a dead
+subagent, a crashed session) — or release it explicitly with
+`release-claim`. Reporting a result (`record-scan`, `record-audit`,
+`report-poc`, `report-remediate`) always clears its own claim as part
+of recording, whether or not it was actually this caller who held it.
 
 Usage:
     python3 range_traversal.py init --config <hosts.json>
     python3 range_traversal.py next
+    python3 range_traversal.py next-batch --count <n> --claimant <id>
+    python3 range_traversal.py release-claim --vmid <golden_vmid> [--finding <finding_id>]
     python3 range_traversal.py record-scan --vmid <golden_vmid> --working-vmid <id> \
         --target <ip> --discover <path to range_discover.py>
     python3 range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <id> \
@@ -55,6 +94,8 @@ Usage:
         --remediate-script <path to range_remediate.py> [--dry-run]
     python3 range_traversal.py report-remediate --vmid <golden_vmid> --finding <finding_id> \
         --remediate-script <path to range_remediate.py> --result-file <path>
+    python3 range_traversal.py resolve-review --vmid <golden_vmid> --finding <finding_id> \
+        --resolution accept_risk|retry|closed_manually [--note <text>]
     python3 range_traversal.py status
     python3 range_traversal.py reset-host --vmid <golden_vmid> [--reason <text>]
 """
@@ -66,10 +107,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 STATE_PATH = "/workspace/.range_traversal_state.json"
 STATE_LOCK_PATH = STATE_PATH + ".lock"
 CONTEXT_DIR = "/workspace"
+
+MAX_REMEDIATION_ATTEMPTS = 3
+ACTION_LEASE_TIMEOUT_SECONDS = 1800  # 30 min; a dead claimant's work becomes reclaimable after this
+VALID_RESOLUTIONS = {"accept_risk", "retry", "closed_manually"}
 
 
 @contextlib.contextmanager
@@ -114,6 +160,12 @@ def finding_description(finding: dict) -> str:
     if finding["scope"] == "network":
         return f"{finding.get('service') or 'unknown service'} {finding.get('version') or ''} " \
                f"on port {finding.get('port')}/{finding.get('proto')}".strip()
+    if finding.get("item"):
+        # Split finding (see range_host_audit.py's SPLITTERS) — the
+        # item text itself is the specific, actionable thing, more
+        # useful here than the shared category/command every sibling
+        # finding also carries.
+        return f"{finding.get('category')}: {finding['item'][:200]}"
     return finding.get("description") or f"{finding.get('category')}: {finding.get('command')}"
 
 
@@ -161,64 +213,169 @@ def cmd_init(config_path: str):
     }, indent=2))
 
 
-def host_action(vmid: str, rec: dict):
-    """Returns the next action for ONE host, or None if this host is
-    fully done (every finding terminal, or audit/scan failed with
-    nothing further to do)."""
+def host_action_list(vmid: str, rec: dict):
+    """Returns (actions, review) for ONE host: `actions` is every
+    currently-available action for this host (NOT just the first —
+    once scan+audit are both done, several of a host's findings can be
+    independently actionable at once, which is what lets next-batch
+    hand out real concurrent work within a single host, not just
+    across hosts). `review` is any finding that has no further
+    automatic action (reverify_failed, or remediation_planned past its
+    retry cap / explicitly flagged needs_operator_decision) — these are
+    NOT included in `actions`: they never block this host's other
+    findings, and they never block cmd_next from moving on to another
+    host. Each action/review item carries a "key" used for leasing;
+    callers must strip it before printing to the agent."""
+    actions, review = [], []
+
     if rec["network_scan_status"] == "not_started":
-        return {
-            "vmid": vmid, "host": rec["host"], "action": "clone_and_scan",
+        actions.append({
+            "key": f"{vmid}:host", "vmid": vmid, "host": rec["host"], "action": "clone_and_scan",
             "note": f"Clone+start {rec['host']}-golden (vmid {vmid}) as {rec['host']}-ctf via "
                     "proxmox_bridge.py, then call range_discover.py against its address and "
                     "feed the result to `record-scan`.",
-        }
+        })
+        return actions, review  # nothing else is possible for this host yet
     if rec["network_scan_status"] == "scanned" and rec["local_audit_status"] == "not_started":
-        return {
-            "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+        actions.append({
+            "key": f"{vmid}:host", "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
             "target": rec["last_scan_target"] or rec["ipv4"], "action": "local_audit",
             "note": "Call range_host_audit.py against the working clone over SSH (root/Administrator) "
                     "and feed the result to `record-audit`.",
-        }
+        })
+        return actions, review
 
     for fid, finding in rec["findings"].items():
         status = finding["status"]
+        key = f"{vmid}:{fid}"
         if status == "discovered":
-            return {
-                "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+            actions.append({
+                "key": key, "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
                 "finding_id": fid, "scope": finding["scope"], "action": "assign_poc",
                 "description": finding_description(finding),
-            }
-        if status == "poc_confirmed":
-            return {
-                "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+            })
+        elif status == "poc_confirmed":
+            actions.append({
+                "key": key, "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
                 "finding_id": fid, "action": "assign_remediate",
                 "description": finding_description(finding),
-            }
-        if status == "remediation_applied":
-            return {
-                "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+            })
+        elif status == "remediation_planned":
+            if finding.get("needs_operator_decision") or \
+               finding.get("remediation_attempts", 0) >= MAX_REMEDIATION_ATTEMPTS:
+                review.append({
+                    "key": key, "vmid": vmid, "host": rec["host"], "finding_id": fid, "action": "review_needed",
+                    "note": "Remediation was attempted but never came back `applied: true` — "
+                            + ("the agent explicitly flagged needs_operator_decision. "
+                               if finding.get("needs_operator_decision")
+                               else f"retried {finding.get('remediation_attempts', 0)} time(s), at the cap. ")
+                            + "Read `status` for remediation_summary/risk_notes, then call "
+                              "`resolve-review` once a human/operator has decided what to do with it.",
+                })
+            else:
+                actions.append({
+                    "key": key, "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
+                    "finding_id": fid, "action": "assign_remediate", "retry": True,
+                    "description": finding_description(finding),
+                    "note": f"Retry {finding.get('remediation_attempts', 0) + 1}/{MAX_REMEDIATION_ATTEMPTS} "
+                            "— the prior attempt reported applied: false.",
+                })
+        elif status == "remediation_applied":
+            actions.append({
+                "key": key, "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
                 "finding_id": fid, "scope": finding["scope"], "action": "assign_reverify",
                 "description": finding_description(finding),
-            }
-        if status == "reverify_failed":
-            return {
-                "vmid": vmid, "host": rec["host"], "working_vmid": rec["working_vmid"],
-                "finding_id": fid, "action": "review_needed",
-                "note": "Remediation did not close this finding — read `status` for its "
-                        "remediation_summary/evidence before trying again; the operator "
-                        "should also be told about this one directly.",
-            }
-    return None
+            })
+        elif status == "reverify_failed":
+            review.append({
+                "key": key, "vmid": vmid, "host": rec["host"], "finding_id": fid, "action": "review_needed",
+                "note": "Remediation did not close this finding on reverify — read `status` for its "
+                        "remediation_summary/evidence, then call `resolve-review` once a human/operator "
+                        "has decided what to do with it. This does NOT block this host's other findings "
+                        "or any other host.",
+            })
+        # else: terminal (poc_not_reachable, poc_inconclusive, reverified_closed,
+        # risk_accepted, closed_manually) — nothing to do.
+    return actions, review
+
+
+def all_actions(state: dict):
+    actions, review = [], []
+    for vmid, rec in state["hosts"].items():
+        a, r = host_action_list(vmid, rec)
+        actions.extend(a)
+        review.extend(r)
+    return actions, review
+
+
+def _claim_active(state: dict, key: str, now: float) -> bool:
+    claim = state.get("claims", {}).get(key)
+    return bool(claim) and (now - claim["claimed_at"]) < ACTION_LEASE_TIMEOUT_SECONDS
+
+
+def _claim(state: dict, key: str, claimant: str, now: float):
+    state.setdefault("claims", {})[key] = {"claimant": claimant, "claimed_at": now}
+
+
+def _clear_claim(state: dict, key: str):
+    state.get("claims", {}).pop(key, None)
+
+
+def _strip_key(action: dict) -> dict:
+    return {k: v for k, v in action.items() if k != "key"}
 
 
 def cmd_next():
-    state = load_state()
-    for vmid, rec in state["hosts"].items():
-        action = host_action(vmid, rec)
-        if action is not None:
-            print(json.dumps(action, indent=2))
+    now = time.time()
+    with state_lock():
+        state = load_state()
+        actions, review = all_actions(state)
+        for action in actions:
+            if _claim_active(state, action["key"], now):
+                continue
+            _claim(state, action["key"], "primary", now)
+            save_state(state)
+            print(json.dumps(_strip_key(action), indent=2))
             return
-    print(json.dumps({"done": True, "summary": summarize(state)}, indent=2))
+        save_state(state)
+    if review:
+        print(json.dumps({
+            "done_pending_review": True,
+            "review_needed": [_strip_key(r) for r in review],
+            "summary": summarize(state),
+        }, indent=2))
+    else:
+        print(json.dumps({"done": True, "summary": summarize(state)}, indent=2))
+
+
+def cmd_next_batch(count: int, claimant: str):
+    now = time.time()
+    claimed = []
+    with state_lock():
+        state = load_state()
+        actions, review = all_actions(state)
+        for action in actions:
+            if len(claimed) >= count:
+                break
+            if _claim_active(state, action["key"], now):
+                continue
+            _claim(state, action["key"], claimant, now)
+            claimed.append(_strip_key(action))
+        save_state(state)
+    print(json.dumps({
+        "claimed": claimed, "count": len(claimed),
+        "review_needed": [_strip_key(r) for r in review],
+    }, indent=2))
+
+
+def cmd_release_claim(vmid: str, fid: str | None):
+    key = f"{vmid}:{fid}" if fid else f"{vmid}:host"
+    with state_lock():
+        state = load_state()
+        existed = key in state.get("claims", {})
+        _clear_claim(state, key)
+        save_state(state)
+    print(json.dumps({"released": True, "key": key, "existed": existed}, indent=2))
 
 
 def cmd_record_scan(vmid: str, working_vmid: str, target: str, discover_script: str, nmap_path: str, ports: str):
@@ -241,6 +398,7 @@ def cmd_record_scan(vmid: str, working_vmid: str, target: str, discover_script: 
 
         if scan_result.get("_error") or not scan_result.get("reachable", False):
             rec["network_scan_status"] = "scan_failed"
+            _clear_claim(state, f"{vmid}:host")
             save_state(state)
             print(json.dumps({"recorded": True, "reachable": False, "scan_result": scan_result}, indent=2))
             return
@@ -256,6 +414,7 @@ def cmd_record_scan(vmid: str, working_vmid: str, target: str, discover_script: 
                     "service": f.get("service", ""), "version": f.get("version", ""),
                     "status": "discovered", "poc_evidence": "", "poc_method": "", "remediation_summary": "",
                 }
+        _clear_claim(state, f"{vmid}:host")
         save_state(state)
 
     print(json.dumps({"recorded": True, "reachable": True, "findings_total": len(rec["findings"])}, indent=2))
@@ -278,6 +437,7 @@ def cmd_record_audit(vmid: str, working_vmid: str, target: str, audit_script: st
 
         if audit_result.get("_error") or not audit_result.get("reachable", False):
             rec["local_audit_status"] = "audit_failed"
+            _clear_claim(state, f"{vmid}:host")
             save_state(state)
             print(json.dumps({"recorded": True, "reachable": False, "audit_result": audit_result}, indent=2))
             return
@@ -285,15 +445,21 @@ def cmd_record_audit(vmid: str, working_vmid: str, target: str, audit_script: st
         rec["local_audit_status"] = "audited"
         new_findings = 0
         for f in audit_result.get("findings", []):
-            fid = finding_id("local", f["category"], f["command"])
+            # f.get("item") disambiguates a split finding (see
+            # range_host_audit.py's SPLITTERS) from its siblings in the
+            # same category/command — without it, every item split out
+            # of one bundled check would hash to the SAME finding_id and
+            # collapse back into one finding, defeating the split.
+            fid = finding_id("local", f["category"], f["command"], f.get("item") or "")
             if fid not in rec["findings"]:
                 rec["findings"][fid] = {
                     "scope": "local",
-                    "category": f["category"], "command": f["command"],
+                    "category": f["category"], "command": f["command"], "item": f.get("item"),
                     "output": f.get("output", ""), "description": f.get("description", ""),
                     "status": "discovered", "poc_evidence": "", "poc_method": "", "remediation_summary": "",
                 }
                 new_findings += 1
+        _clear_claim(state, f"{vmid}:host")
         save_state(state)
 
     print(json.dumps({
@@ -385,6 +551,7 @@ def cmd_report_poc(vmid: str, fid: str, poc_script: str, result_file: str, rever
         finding["status"] = status
         finding["poc_evidence"] = result.get("evidence", finding["poc_evidence"])
         finding["poc_method"] = result.get("method", finding["poc_method"])
+        _clear_claim(state, f"{vmid}:{fid}")
         save_state(state)
 
     print(json.dumps({"vmid": vmid, "finding_id": fid, "status": status}, indent=2))
@@ -400,10 +567,11 @@ def cmd_assign_remediate(vmid: str, fid: str, remediate_script: str, dry_run: bo
     rec = state["hosts"][vmid]
     finding = rec["findings"][fid]
 
-    if finding["status"] != "poc_confirmed":
+    if finding["status"] not in ("poc_confirmed", "remediation_planned"):
         print(json.dumps({
             "assigned": False,
-            "reason": f"finding {fid} has status '{finding['status']}', expected 'poc_confirmed'.",
+            "reason": f"finding {fid} has status '{finding['status']}', expected 'poc_confirmed' "
+                      "(first attempt) or 'remediation_planned' (retry after applied: false).",
         }, indent=2))
         sys.exit(1)
 
@@ -449,9 +617,23 @@ def cmd_report_remediate(vmid: str, fid: str, remediate_script: str, result_file
         status = "remediation_applied" if result.get("applied") else "remediation_planned"
         finding["status"] = status
         finding["remediation_summary"] = result.get("remediation_summary", finding["remediation_summary"])
+        # Previously discarded entirely — needs_operator_decision/risk_notes
+        # are exactly what host_action_list() now needs to tell a genuine
+        # "operator must decide" outcome apart from a plain retry, and
+        # what resolve-review's caller needs to read before deciding.
+        finding["needs_operator_decision"] = bool(result.get("needs_operator_decision", False))
+        finding["risk_notes"] = result.get("risk_notes", finding.get("risk_notes", ""))
+        finding["remediation_attempts"] = (
+            finding.get("remediation_attempts", 0) + 1 if status == "remediation_planned" else 0
+        )
+        _clear_claim(state, f"{vmid}:{fid}")
         save_state(state)
 
-    print(json.dumps({"vmid": vmid, "finding_id": fid, "status": status}, indent=2))
+    print(json.dumps({
+        "vmid": vmid, "finding_id": fid, "status": status,
+        "remediation_attempts": finding["remediation_attempts"],
+        "needs_operator_decision": finding["needs_operator_decision"],
+    }, indent=2))
 
 
 def cmd_reset_host(vmid: str, reason: str):
@@ -502,6 +684,74 @@ def cmd_reset_host(vmid: str, reason: str):
     }, indent=2))
 
 
+def cmd_resolve_review(vmid: str, fid: str, resolution: str, note: str):
+    """The only sanctioned way to move a finding off `reverify_failed` or
+    a `remediation_planned` stuck past its retry cap — same principle
+    AGENTS.md's standing rules already state for .ctf_traversal_state.json:
+    nothing but this script's own commands touches a tracked status.
+    `accept_risk`/`closed_manually` are real terminal outcomes (an
+    operator judgment call, or a fix applied by hand outside this
+    tool) — NOT silent abandonment; they're recorded in the host's own
+    review_log, same spirit as the closing-note requirement AGENTS.md
+    already imposes for an exhausted CTF problem. `retry` resets the
+    attempt counter and sends it back for a fresh remediation pass."""
+    if resolution not in VALID_RESOLUTIONS:
+        print(json.dumps({
+            "resolved": False,
+            "reason": f"--resolution must be one of {sorted(VALID_RESOLUTIONS)}, got {resolution!r}",
+        }, indent=2))
+        sys.exit(1)
+
+    with state_lock():
+        state = load_state()
+        if vmid not in state["hosts"] or fid not in state["hosts"][vmid]["findings"]:
+            print(json.dumps({"resolved": False, "reason": f"vmid {vmid} / finding {fid} not found in state"}, indent=2))
+            sys.exit(1)
+        rec = state["hosts"][vmid]
+        finding = rec["findings"][fid]
+        prior_status = finding["status"]
+
+        is_stuck_remediation_planned = (
+            prior_status == "remediation_planned"
+            and (finding.get("needs_operator_decision") or finding.get("remediation_attempts", 0) >= MAX_REMEDIATION_ATTEMPTS)
+        )
+        if prior_status != "reverify_failed" and not is_stuck_remediation_planned:
+            print(json.dumps({
+                "resolved": False,
+                "reason": f"finding {fid} has status '{prior_status}', which isn't currently "
+                          "flagged for review (reverify_failed, or remediation_planned past its "
+                          "retry cap / flagged needs_operator_decision) — nothing to resolve.",
+            }, indent=2))
+            sys.exit(1)
+
+        rec.setdefault("review_log", []).append({
+            "finding_id": fid, "prior_status": prior_status, "resolution": resolution,
+            "note": note or "", "resolved_at": time.time(),
+        })
+        if resolution == "accept_risk":
+            new_status = "risk_accepted"
+        elif resolution == "closed_manually":
+            new_status = "closed_manually"
+        else:  # "retry"
+            finding["remediation_attempts"] = 0
+            finding["needs_operator_decision"] = False
+            # reverify_failed means the APPLIED remediation didn't hold —
+            # retry from poc_confirmed so a fresh fix is proposed, not a
+            # repeat of the same one. A stalled remediation_planned just
+            # needs its attempt cap reset; it's already sitting where
+            # host_action_list() will retry it on its own.
+            new_status = "poc_confirmed" if prior_status == "reverify_failed" else "remediation_planned"
+        finding["status"] = new_status
+        finding["operator_note"] = note or finding.get("operator_note", "")
+        _clear_claim(state, f"{vmid}:{fid}")
+        save_state(state)
+
+    print(json.dumps({
+        "resolved": True, "vmid": vmid, "finding_id": fid,
+        "prior_status": prior_status, "new_status": new_status,
+    }, indent=2))
+
+
 def summarize(state: dict) -> dict:
     host_counts = {}
     audit_counts = {}
@@ -531,6 +781,14 @@ def main():
     p_init.add_argument("--config", required=True)
 
     sub.add_parser("next")
+
+    p_nb = sub.add_parser("next-batch")
+    p_nb.add_argument("--count", type=int, required=True, help="max number of actions to claim")
+    p_nb.add_argument("--claimant", required=True, help="identifier for whoever's claiming these, e.g. a subagent id")
+
+    p_rc = sub.add_parser("release-claim")
+    p_rc.add_argument("--vmid", required=True, help="the golden VMID (hosts.json key)")
+    p_rc.add_argument("--finding", default=None, help="omit to release a host-level claim (clone_and_scan/local_audit)")
 
     p_rs = sub.add_parser("record-scan")
     p_rs.add_argument("--vmid", required=True, help="the golden VMID (hosts.json key)")
@@ -574,6 +832,12 @@ def main():
     p_rr.add_argument("--remediate-script", required=True)
     p_rr.add_argument("--result-file", required=True)
 
+    p_res = sub.add_parser("resolve-review")
+    p_res.add_argument("--vmid", required=True, help="the golden VMID (hosts.json key)")
+    p_res.add_argument("--finding", required=True)
+    p_res.add_argument("--resolution", required=True, choices=sorted(VALID_RESOLUTIONS))
+    p_res.add_argument("--note", default="", help="operator's reasoning — recorded in the host's review_log")
+
     sub.add_parser("status")
 
     p_rh = sub.add_parser("reset-host")
@@ -588,6 +852,10 @@ def main():
         cmd_init(args.config)
     elif args.command == "next":
         cmd_next()
+    elif args.command == "next-batch":
+        cmd_next_batch(args.count, args.claimant)
+    elif args.command == "release-claim":
+        cmd_release_claim(args.vmid, args.finding)
     elif args.command == "record-scan":
         cmd_record_scan(args.vmid, args.working_vmid, args.target, args.discover, args.nmap_path, args.ports)
     elif args.command == "record-audit":
@@ -600,6 +868,8 @@ def main():
         cmd_assign_remediate(args.vmid, args.finding, args.remediate_script, args.dry_run)
     elif args.command == "report-remediate":
         cmd_report_remediate(args.vmid, args.finding, args.remediate_script, args.result_file)
+    elif args.command == "resolve-review":
+        cmd_resolve_review(args.vmid, args.finding, args.resolution, args.note)
     elif args.command == "status":
         cmd_status()
     elif args.command == "reset-host":

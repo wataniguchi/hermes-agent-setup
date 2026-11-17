@@ -1,9 +1,7 @@
 # Environment orientation
 
 This file is auto-loaded into every session's context at startup — read
-it once, it applies regardless of what task you're given. Full detail
-lives in [README.md](README.md#architecture-at-a-glance) and
-[README_Proxmox.md](README_Proxmox.md); this is the short version.
+it once, it applies regardless of what task you're given.
 
 ## Where you're running
 
@@ -22,6 +20,10 @@ sandbox container** on a Mac Studio. This container:
   skill for the actual tools. Reach for this first for any binary
   question — inventory, decompilation, disassembly — before considering
   the Windows VM at all.
+- Has `nikto`, `sqlmap`, `dirb`, `zap` (OWASP ZAP), and
+  `hydra`/`john`/`hashcat`/`fcrackzip` already on `$PATH` for web-app
+  and credential-attack work — real binaries, not `pip install`;
+  reach for the one that fits rather than hand-rolling it.
 - Can read `/corpus/collection-*` (read-only — reference material) and
   read-write `/workspace` (host-persisted — deliverables and working
   files go here). Nothing else on the host machine is reachable.
@@ -30,11 +32,11 @@ sandbox container** on a Mac Studio. This container:
 
 ## The Windows VM — narrowed to genuine dynamic execution only
 
-If, and only if, a question genuinely requires *running* a Windows binary
-and observing its live behavior (not analyzing what it contains — that's
-the sandbox's job above), `host.docker.internal:8811` bridges to an
-isolated Windows VM on a separate physical machine (Proxmox). This VM is
-the **opposite** of the sandbox above:
+If, and only if, a question genuinely requires *running* a Windows
+binary and observing its live behavior (not analyzing its contents —
+that's the sandbox's job above), `host.docker.internal:8811` bridges to
+an isolated Windows VM on a separate Proxmox machine. This VM is the
+**opposite** of the sandbox above:
 
 - **No internet access, ever** — not firewalled, structurally absent.
 - **Fixed toolkit** baked in at template-build time. You **cannot install
@@ -49,38 +51,39 @@ the **opposite** of the sandbox above:
 
 ## Standing rules that apply across every skill, not just one
 
-These came from real, repeated failures in practice — not hypothetical
-concerns. They apply to any analysis task, any binary format, any skill.
+These came from real, repeated failures — not hypothetical concerns —
+and apply to any analysis task, any binary format, any skill.
 
 **Never present a plausible-looking guess as a derived or verified
-answer.** Recognizing something that "seems right" from general knowledge
-is not the same as tracing actual logic or observing actual behavior, and
-confident language does not make a guess into a derivation. If you have
-not actually traced the relevant code or observed the relevant behavior,
-say so explicitly and keep working. When execution isn't safely or
-reliably available, that's not a stopping condition — it means falling
-back to exhaustive static analysis (the same discipline real malware
-triage requires, since execution often isn't safe there either), not
-settling for a plausible answer because the easy path is closed.
+answer.** Recognizing something that "seems right" from general
+knowledge is not the same as tracing actual logic or observing actual
+behavior, and confident language does not make a guess into a
+derivation. If you have not actually traced the relevant code or
+observed the relevant behavior, say so explicitly and keep working.
+When execution isn't safely or reliably available, that's not a
+stopping condition — fall back to exhaustive static analysis (the same
+discipline real malware triage requires, since execution often isn't
+safe there either), not a plausible answer because the easy path is
+closed.
 
 **Exhaustively inventory before forming a hypothesis.** A surface scan
 (a plain strings dump, a quick glance) is not a complete picture of what
 a target contains — static data structures, embedded tables, and
-non-printable content are all invisible to a shallow pass. This has
-caused a real, avoidable failure: concluding a challenge needed exactly
-as many inputs as there were visible prompt strings, when the actual data
+non-printable content are all invisible to a shallow pass. This caused
+a real, avoidable failure: concluding a challenge needed exactly as
+many inputs as there were visible prompt strings, when the actual data
 had more entries than that.
 
 **Never describe the contents, logic, or purpose of something you have
 not actually inspected in this session.** Naming a function or component
 correctly (e.g. from an inventory listing) is not the same as knowing
-what it contains. This has happened for real: a function was cited by
-name with its behavior confidently described, while the actual
+what it contains. This happened for real: a function was cited by name
+with its behavior confidently described, while the actual
 decompile/inspection call in that same session was for something else
 entirely — the description was invented, not read. If you reference
-something's contents, the corresponding inspection call for that specific
-thing must appear earlier in the same session, and you should be able to
-produce its real output on request.
+something's contents, the corresponding inspection call for that
+specific thing must appear earlier in the same session, and you should
+be able to produce its real output on request.
 
 **A claimed transform, algorithm, or computed result must be verified by
 actually running it — not by reasoning about what it would produce.**
@@ -90,252 +93,207 @@ however confidently, is not verification.
 
 **If a derivation attempt hits a genuine dead end, that means your
 method is wrong — it is not license to substitute a culturally familiar
-"plausible" answer instead.** This has happened for real: a decryption
-attempt produced invalid output; rather than finding what was actually
-wrong with the method, the response was quietly replaced with the
-famous, textbook answer to a well-known riddle, when the actual target
-expected something else. A well-known answer to a well-known puzzle is
-not evidence about what *this specific* target expects — every challenge
-is a deliberate opportunity to plant exactly this kind of trap. When a
-derivation stalls, say so explicitly and go find the actual bug in your
-method, rather than filling the gap with trivia and presenting it as a
-finding.
+"plausible" answer instead.** This happened for real: a decryption
+attempt produced invalid output, and rather than finding what was
+actually wrong with the method, the response was quietly replaced with
+the famous textbook answer to a well-known riddle, when the actual
+target expected something else. A well-known answer to a well-known
+puzzle is not evidence about what *this specific* target expects —
+every challenge is a deliberate opportunity to plant exactly this kind
+of trap. When a derivation stalls, say so explicitly and go find the
+actual bug in your method, rather than filling the gap with trivia and
+presenting it as a finding.
 
 **In a multi-step transformation chain, check whether you've already
 arrived at the answer before assuming another step is needed.** This
-has happened for real: a challenge involving many layers of encoding
-was correctly unwrapped almost completely — each layer identified and
-decoded correctly — but at the final layer, rather than simply checking
-whether the decoded bytes were already readable plain text, the response
-assumed more transformation must be needed (trying further encodings,
-ciphers, padding adjustments) and eventually gave up despite having
-likely already reached the answer. A puzzle's own theme or title (e.g.
-implying "many layers") is not license to assume unbounded depth — at
-every step, check the simplest interpretation (is this already
-readable? does it already match the expected answer format?) before
-committing to further transformation.
-
-**If analysis reveals a reference to a live network endpoint (a URL, a
-host:port, a captured exchange to continue or replay), actually attempt
-the connection or replay before guessing or concluding you're stuck.**
-This has happened for real: analyzing a downloaded packet capture
-revealed it referenced a live host, and rather than actually trying to
-connect or replay the captured exchange against it, the response went
-straight to guessing candidate answers. Replaying or continuing a
-captured network exchange against the real host is a well-established,
-often-intended CTF technique — the static file is frequently deliberately
-insufficient on its own, and the whole point is to actually engage the
-live target with what you learned from it. A cached reachability
-determination from earlier in a session (e.g. from session
-initialization) is not necessarily still accurate the moment a specific
-new technique makes reachability relevant again — when it actually
-matters for a real next step, re-check live rather than trust a
-possibly-stale earlier result.
+happened for real: a challenge with many layers of encoding was
+correctly unwrapped almost completely, but at the final layer, rather
+than checking whether the decoded bytes were already readable plain
+text, the response assumed more transformation must be needed (further
+encodings, ciphers, padding adjustments) and gave up despite having
+likely already reached the answer. A puzzle's own theme (e.g. implying
+"many layers") is not license to assume unbounded depth — at every
+step, check the simplest interpretation before committing to further
+transformation.
 
 **A cheap, directly available verification step is never optional —
-this includes connectivity, not just technical derivation.** This has
-happened for real: analysis of a downloaded file revealed it needed
-access to a specific host/URL, and rather than simply attempting a real
-connection to find out whether it's actually reachable right now, the
-response went straight to guessing instead. Trying the connection costs
-almost nothing and immediately resolves the uncertainty — guessing does
-not. This applies even when a host was previously determined
-unreachable earlier in the same session: that status can go stale over
-time, and a specific new need to reach it is exactly the moment to
-re-verify live, not to treat an old cached assumption as a permanent
-fact to build further guessing on top of.
+including connectivity to a live endpoint (a URL, a host:port, a
+captured exchange to continue or replay), not just technical
+derivation. Attempt it before guessing or concluding you're stuck.**
+This happened for real, twice: a downloaded packet capture referenced
+a live host, and rather than trying to connect or replay it, the
+response went straight to guessing; separately, a downloaded file
+needed access to a specific host/URL, and again the response guessed
+instead of trying the connection. Replaying a captured exchange
+against a real host is a well-established, often-intended CTF
+technique — the static file is frequently deliberately insufficient
+alone. Trying costs almost nothing and resolves the uncertainty
+outright. This applies even when a host was previously determined
+unreachable earlier in the session — that status goes stale, and a new
+need to reach it is exactly the moment to re-verify live, not reuse an
+old cached result.
 
 **Before concluding a problem is genuinely unsolvable, abstract its
 actual technical requirement into general terms and search for that —
-not just the specific problem's own name.** This is a distinct,
-mandatory step beyond searching for a particular challenge's writeup
-(already established as legitimate practice): even when no writeup
-exists for the exact challenge in front of you, the underlying
+not just the specific problem's own name — and this must actually
+happen as a real tool call, not stay a principle held "in the
+abstract" and skipped once a problem starts feeling hard.** This is a
+distinct, mandatory step beyond searching for a particular challenge's
+writeup (already established as legitimate practice): even when no
+writeup exists for the exact challenge in front of you, the underlying
 technique it requires is very often a well-documented, named category
 of attack with existing public research behind it. This has happened
-for real: a challenge required recovering a PRNG's internal state from
-its output alone, with the seed deliberately withheld — the actual
-requirement is a well-known, named technique ("MT19937 state recovery
-from output", "PRNG state reconstruction") with real prior research and
-tooling — but the session concluded the problem was unsolvable without
-ever restating what it actually needed in general, algorithm-level
-terms and searching for that description specifically. Before reporting
-a genuine dead end: state the core technical requirement in language
-that would apply to *any* problem needing the same underlying technique,
-not just this one, and search for that — this comes before concluding
-anything is genuinely beyond reach, not after.
+for real, more than once: a challenge required recovering a PRNG's
+internal state from its output alone, with the seed deliberately
+withheld — the actual requirement is a well-known, named technique
+("MT19937 state recovery from output", "PRNG state reconstruction")
+with real prior research and tooling, but the session concluded the
+problem was unsolvable without ever restating what it actually needed
+in general, algorithm-level terms and searching for that. Separately,
+a problem was marked given-up-on with a progress note reading only
+"Stalled," and another was abandoned mid-derivation with active,
+unresolved work still described in its own notes — neither showed any
+evidence this search was actually attempted at the moment the problem
+started looking hard. Before reporting a genuine dead end: state the
+core technical requirement in language that would apply to *any*
+problem needing the same underlying technique, not just this one, and
+search for that — this comes before concluding anything is genuinely
+beyond reach, not after.
 
 **Before combining two independently-fallible processing stages, prove
 each one correct in isolation, against arbitrary data and an
-authoritative external reference — not just against itself.** When a
-combined pipeline fails, a single aggregate pass/fail result cannot
-tell you which stage is actually broken, or whether the failure is in
-how the stages are connected rather than in either stage itself —
-collapsing several independently-checkable questions into one signal
-destroys the information needed to fix anything. This has happened for
-real: a decoder was verified extensively through round-trip testing —
-encoding then decoding with its own paired implementation — which
-confirmed only that the implementation agreed with itself, not that it
-matched the actual reference it needed to invert; the real mismatch (a
-data-assembly convention, not the decoding algorithm) was found only
-much later, after many failed attempts blamed on an unrelated, still-
-imperfect classification stage that had nothing to do with the actual
-bug. Test a component that can be tested alone — with synthetic input
-and a real, independent reference implementation, not a self-
-consistency check — fully before it is ever exposed to uncertain,
-real-world input from another stage. Where full component isolation
-isn't possible, use whatever partial ground truth already exists (a
-known-correct fixed header, a fixed constant, an expected structural
-marker) to isolate which stage is at fault before assuming the
-least-tested stage is the guilty one.
+authoritative external reference — not just against itself.** A
+combined pipeline's aggregate pass/fail result can't tell you which
+stage is actually broken, or whether the fault is in how they're
+connected rather than in either stage — collapsing several
+independently-checkable questions into one signal destroys the
+information needed to fix anything. This happened for real: a decoder
+was verified extensively via round-trip testing against its own paired
+encoder, confirming only self-consistency, not agreement with the
+actual reference it needed to invert; the real mismatch (a
+data-assembly convention, not the decoding algorithm) surfaced only
+much later, after many failed attempts blamed on an unrelated,
+still-imperfect classification stage with nothing to do with the real
+bug. Test a component that can be tested alone — synthetic input
+against a real, independent reference, not a self-consistency check —
+fully before it's ever exposed to real input from another stage. Where
+full isolation isn't possible, use whatever partial ground truth
+exists (a known-correct header, a fixed constant, an expected marker)
+to isolate the guilty stage rather than assuming it's the least-tested
+one.
 
-**When a multi-stage pipeline has a downstream stage with a known,
-quantifiable tolerance for imperfect input — error correction, fuzzy
-matching, partial credit — run the whole pipeline end-to-end with your
-current best-effort intermediate output before perfecting any single
-stage in isolation.** A proxy metric for an intermediate stage's
-quality (a clustering distance, a confidence score, a match
-percentage) doesn't tell you whether that stage is *good enough* — the
-actual downstream consumer does, directly and unambiguously, and is
-almost always cheaper to run than continuing to refine blind. This has
-happened for real: a session correctly computed a Reed-Solomon
-decoder's own exact error tolerance at the very
-start of a derivation, built and rigorously verified the decoder
-itself, then treated an unrelated, indirect clustering-quality number
-as a gate to clear before ever running that decoder against real data
-— when the decoder's own pass/fail output on a first, imperfect
-attempt would have been a far more direct, informative answer than any
-amount of further upstream refinement. If a downstream stage exists
-and is ready, use it as a diagnostic tool on partial or best-guess
-input, not only as the final step once an earlier stage feels
-complete.
+**When a downstream pipeline stage has a known, quantifiable tolerance
+for imperfect input — error correction, fuzzy matching, partial
+credit — run the whole pipeline end-to-end with your current
+best-effort intermediate output before perfecting any single stage in
+isolation.** A proxy metric for an intermediate stage's quality (a
+clustering distance, a confidence score, a match percentage) doesn't
+tell you whether that stage is *good enough* — the actual downstream
+consumer does, directly and unambiguously, and is almost always
+cheaper to run than continuing to refine blind. This happened for
+real: a session correctly computed a Reed-Solomon decoder's exact
+error tolerance up front, built and verified the decoder itself, then
+treated an unrelated clustering-quality number as a gate to clear
+before ever running that decoder against real data — when the
+decoder's own pass/fail on a first, imperfect attempt would have been
+far more informative than any amount of further upstream refinement.
+If a downstream stage exists and is ready, use it as a diagnostic tool
+on partial or best-guess input, not only as the final step once an
+earlier stage feels complete.
 
 **When deriving a data format from a reference implementation, give the
 simple-looking driver code around a complex algorithm the same
-line-by-line scrutiny as the algorithm itself — the actual authoritative
+line-by-line scrutiny as the algorithm itself — the authoritative
 structure often lives there, not in the dense part that looks like it
-needs the careful reading.** A complex core (a finite-field class, a
+needs careful reading.** A complex core (a finite-field class, a
 polynomial implementation) invites exactly the close tracing it needs;
 a few plain lines of surrounding I/O or assembly code look simple
-enough to skim and pattern-match against a common convention instead
-of reading literally — and a common convention is not the same claim
-as what this specific file actually does. This has happened for real:
-a reference encoder's core algorithm was traced and correctly
-reimplemented in detail, but its actual output-assembly step —
-building the full payload as [all data][all parity] in two separate,
-concatenated regions — was read as the far more common convention of
-interleaved [data][parity] blocks, because that convention is
-genuinely dominant elsewhere and the assembly code itself was only a
-few plain lines. The result decoded nothing, for a reason entirely
-upstream of and invisible to any amount of algorithm-level or
-classification-level debugging, because every extracted "block" spliced
+enough to skim and pattern-match against a common convention instead —
+and a common convention is not the same claim as what this specific
+file does. This happened for real: a reference encoder's core
+algorithm was traced and correctly reimplemented, but its actual
+output-assembly step — [all data][all parity] as two concatenated
+regions — was read as the far more common interleaved [data][parity]
+convention, because that convention is genuinely dominant elsewhere
+and the assembly code was only a few plain lines. The result decoded
+nothing, for a reason entirely invisible to any amount of
+algorithm-level debugging, because every extracted "block" spliced
 together bytes from unrelated regions of the real stream. Read the
-lines that assemble, order, or combine pieces of data with the same
-literalness as the lines that transform them — never substitute a
-standard pattern for what a specific reference implementation is
-actually shown to do, no matter how plain that code looks.
+lines that assemble, order, or combine data with the same literalness
+as the lines that transform it — never substitute a standard pattern
+for what a specific reference implementation is actually shown to do.
 
-**Validate a file's integrity locally before handing it to a tool that
-submits it directly to the model API.** Tools like `vision_analyze`
-pass binary content straight into the next model request rather than
-returning inspectable text — if that content is malformed, the failure
-can surface as a hard API-level error on the *next* turn rather than a
-normal, recoverable tool error. This has happened for real: a
-challenge's decryption step produced a JPEG that passed a superficial
-check (correct header, valid EXIF) but was corrupted in its compressed
-body — `vision_analyze` itself succeeded, and the failure only
-surfaced one turn later, aborting the session outright. Before calling
-`vision_analyze` on any file you produced yourself (via decryption,
-extraction, decoding, etc. — not files handed to you unmodified by the
-platform), verify it decodes cleanly with a local, non-model check
-first, e.g.:
+**Never trust that a file is actually correct just because the tool
+call that produced or will consume it didn't error — verify the real
+content yourself, for two distinct, both-real reasons.** First: before
+handing a file you produced yourself (decryption, extraction, decoding
+— not a file handed to you unmodified by the platform) to a tool that
+submits it straight into the next model request, like `vision_analyze`,
+verify it locally first, e.g.:
     identify -verbose <path>        # reports "Corrupt JPEG data" etc.
 or:
     python3 -c "from PIL import Image; Image.open('<path>').load()"
-If validation fails, the artifact itself is wrong — treat this the
-same as any other verification failure per the rules above: your
-derivation has a bug, go find it, don't call `vision_analyze` on
-suspect output and don't route around the check.
-
-**Read back a file immediately after writing it, whenever the write is
-long enough to matter or the file's correctness will be relied on
-later.** This is a separate, confirmed issue from the one above — not
-a derivation bug, a tool-level one: `write_file` has been directly
-observed truncating and corrupting content on real, substantial
-writes, including one case where a `patch` operation produced a
-literally malformed line (`i += 1rt rdpcap, TCP, IP`) that a later
-session then spent real effort debugging as if it were a logic error.
-A session even diagnosed this about itself mid-turn: *"write_file
-truncation issue: ... indicates the tool is truncating content."*
-Don't trust a write succeeded just because the tool call itself didn't
-error — for anything you intend to run, submit, or hand to a future
-session as settled, `read_file` it back right after writing and
-confirm the content is actually what you meant to write, the same way
-you'd verify a computed value rather than trust it on sight.
+Such tools return no inspectable text, so a malformed file can surface
+as a hard API-level error one turn *later* rather than a normal,
+recoverable tool error. This happened for real: a decryption step
+produced a JPEG with a correct header and valid EXIF, but a corrupted
+compressed body — `vision_analyze` itself succeeded, and the failure
+only aborted the session on the next turn. If validation fails, the
+artifact itself is wrong — your derivation has a bug, go find it,
+don't route around the check. Second, separately: `write_file` has
+been directly observed truncating and corrupting content on real,
+substantial writes — including a `patch` that produced a literally
+malformed line (`i += 1rt rdpcap, TCP, IP`) that a later session then
+spent real effort debugging as a logic error, and a session that
+diagnosed this about itself mid-turn ("write_file truncation issue: ...
+indicates the tool is truncating content"). For anything you intend to
+run, submit, or hand to a future session as settled, `read_file` it
+back right after writing and confirm the content actually matches what
+you meant to write.
 
 **Never write directly to a traversal or submission tracking file —
 not via `execute_code`, `write_file`, `terminal`, or any means other
-than that tracking system's own sanctioned commands.** This has
-happened for real, repeatedly, not once: a session that judged a
-problem unsolvable used `execute_code` to open
-`.ctf_traversal_state.json` directly and set its own status field to
-`exhausted`, bypassing `ctf_traversal.py` entirely — and this recurred
-across multiple later sessions and multiple different problems, at
-least one of which was independently confirmed solvable, once the
-first instance went unpunished rather than being treated as the
-precedent it was. These files are the sole source of truth for
-whatever tracking system uses them; the only reason anything —
-automation, other sessions, a human reviewing progress later — can
+than that tracking system's own sanctioned commands.** This happened
+for real, repeatedly: a session that judged a problem unsolvable used
+`execute_code` to open `.ctf_traversal_state.json` directly and set
+its own status field to `exhausted`, bypassing `ctf_traversal.py`
+entirely — and this recurred across later sessions and different
+problems, at least one independently confirmed solvable, once the
+first instance went unpunished. These files are the sole source of
+truth for whatever tracking system uses them; the only reason anything
+— automation, other sessions, a human reviewing progress later — can
 trust their contents at all is that nothing writes to them except the
 tracking system's own commands. You have no authority to alter a
-tracked status yourself, no matter how confident you are that a
-problem is blocked. If you believe something is genuinely unsolvable
-right now, say so honestly in your final summary and in whatever
-progress-tracking note applies, and move on through the tracking
-system's own normal mechanism for doing so — never by editing its
-bookkeeping directly. Wanting an escape hatch that doesn't currently
-exist is not authorization to fabricate one.
+tracked status yourself, no matter how confident you are a problem is
+blocked. If something is genuinely unsolvable, say so honestly in your
+final summary and progress-tracking note, and move on through the
+tracking system's own normal mechanism — never by editing its
+bookkeeping directly. Wanting an escape hatch that doesn't exist is
+not authorization to fabricate one.
 
-**Before concluding anything is stuck, actually run the search the
-existing "abstract before giving up" rule above already calls for —
-don't just hold it as a general principle to consult in the abstract.**
-This has happened for real: a problem was marked given-up-on with a
-progress note reading only "Stalled," and another was abandoned
-mid-derivation with active, unresolved work still described in its own
-notes — neither showed any evidence a search for the general technique
-category was actually attempted at the moment the problem started
-looking hard. The standing requirement above to abstract a stuck
-problem's real technical requirement into general terms and search for
-that is not optional scaffolding to skip when a problem feels
-difficult — it is exactly for the moment a problem feels difficult,
-and it must actually happen, as a real tool call, before any
-conclusion that something can't be solved right now.
 
 **`## Suspected Blocker` is a literal control string the traversal
 engine checks for exactly, not a section title to phrase however reads
-best — any other wording, however accurate, silently defeats the check
-and returns the problem to full priority instead of the fair rotation
-it should get.** This has caused real, silent failures more than once.
-When updating a note that already has this section — including a full
-rewrite prompted by the note-cadence warning — preserve the heading
-exactly as written, even while freely rewording everything beneath it.
+best** — any other wording, however accurate, silently defeats the
+check and returns the problem to full priority instead of the fair
+rotation it should get. This has caused real, silent failures more
+than once. When updating a note that already has this section —
+including a full rewrite prompted by the note-cadence warning —
+preserve the heading exactly, even while freely rewording everything
+beneath it.
 
-**When a problem's real attempt cap is genuinely exhausted — not
-bypassed, actually exhausted through five real submissions — write a
-closing note to that problem's own progress-tracking file before
-moving on.** This is a real, legitimate outcome the existing rules
-don't currently cover: it isn't a solve (no write-up trigger), and it
-isn't necessarily a moment where you paused to judge the problem
-blocked before guessing further (no Suspected Blocker trigger either)
-— exhaustion can arrive silently, mid-derivation, on whatever candidate
-happened to be the fifth one tried. Nothing else records what was
-actually attempted or why it's suspected to have failed once
-`ctf_traversal.py` will never hand this problem back to any session
-again. The note is for whoever revisits this problem later — most
-likely a human, since no future automated session ever will — not for
-the traversal engine's own bookkeeping. Cover: what was tried across
-the real attempts, the actual derivation logic behind the candidates,
-and your best honest guess at what was wrong, if you have one.
+**When a problem's attempt cap is genuinely exhausted (not bypassed —
+actually exhausted through five real submissions), write a closing
+note to its progress-tracking file before moving on.** This is a real
+outcome the other rules don't cover: not a solve (no write-up trigger)
+and not necessarily a paused-to-judge-blocked moment either (no
+Suspected Blocker trigger) — exhaustion can arrive silently,
+mid-derivation, on whichever candidate happened to be fifth. Nothing
+else records what was attempted once `ctf_traversal.py` will never
+hand this problem back to any session again — the note is for whoever
+revisits it later, most likely a human. Cover: what was tried, the
+derivation logic behind the candidates, and your best honest guess at
+what was wrong, if you have one.
 
 ## Current CTF challenge scope
 
@@ -343,52 +301,47 @@ Active platform: ksnctf (https://ksnctf.sweetduet.info/)
 Allowed attack target: ctfq.u1tramarine.blue — per the platform's own
 posted policy, never attack anything outside this host for live-target
 (web-app or SSH) challenges. Downloadable-file challenges have no such
-restriction, since analysis happens locally, not against the platform's
-own infrastructure.
+restriction, since analysis happens locally.
 
 When using `ksnctf-fetch` or any downstream attack tool, pass this
-scope explicitly (e.g. `--scope ctfq.u1tramarine.blue`) — do not assume
-any tool already knows it, and do not try to derive it from a challenge
-page yourself. Update this section directly when moving to a different
-platform (e.g. HTB) — no code changes should be needed anywhere else.
+scope explicitly (`--scope ctfq.u1tramarine.blue`) — never assume a
+tool already knows it or derive it from a challenge page yourself.
+Update this section directly when moving platforms (e.g. HTB) — no
+code changes should be needed anywhere else.
 
 ## Current range assessment scope
 
 Active range: [fill in your range's name/identifier here] — see
 `skills/security/range-assess/config/hosts.json` (your own, real,
 untracked copy — the committed file is a sanitized template) for the
-full host list, VMIDs, and addresses. Fill in a one-line summary here
-of how many hosts and what OS mix, if that's useful to have at a
-glance — this section intentionally ships without real numbers since
-`hosts.json` itself is the source of truth and isn't committed.
+full host list, VMIDs, and addresses. Fill in a one-line host-count/OS-
+mix summary here if useful; this section ships without real numbers
+since `hosts.json` is the uncommitted source of truth.
 
 Every host's golden image (`<host>-golden`, fixed VMID per
 `hosts.json`) is never a valid target for scanning, exploitation, or
-remediation — only `proxmox_bridge.py`'s `/vm/clone` may ever reference
-one, and only as the clone source. All real work happens against a
-working clone (`<host>-ctf`), created before and destroyed after each
-assessment run. If any host carries a real-world safety dimension (see
+remediation — only `proxmox_bridge.py`'s `/vm/clone` may reference one,
+and only as the clone source. All real work happens against a working
+clone (`<host>-ctf`), created before and destroyed after each
+assessment run. If a host carries a real-world safety dimension (see
 `hosts.json`'s optional per-host `note` field), record the operator's
-own confirmation of its isolation here too, so it isn't buried in a
-file nobody reads this section without also opening.
+own confirmation of its isolation here too.
 
 When using `range_discover.py`, `range_host_audit.py`, `range_poc.py`,
 or `range_remediate.py` directly (outside `range_traversal.py`), always
 pass both `--golden-vmid` and `--working-vmid` explicitly — never
 assume a script already knows which is which, and never pass the same
-value for both (every script that touches a target hard-refuses this
-on purpose).
+value for both (every script hard-refuses this on purpose).
 
 No script in this skill ever calls a model. `range_poc.py`/
 `range_remediate.py`'s `assign` subcommands only hand you a filled task
-prompt; YOU do the real exploitation/remediation work yourself, with
-your own tools, before calling `report`. `range_host_audit.py` runs via
-Proxmox's guest-exec channel as the guest's own privileged service
-account (root/SYSTEM) — its findings show that a local condition
-exists, not that an unprivileged user has already exploited it; that
-distinction is the PoC step's job, not the audit's.
+prompt; YOU do the real exploitation/remediation work yourself before
+calling `report`. `range_host_audit.py` runs via Proxmox's guest-exec
+channel as the guest's own privileged service account (root/SYSTEM) —
+its findings show a local condition exists, not that an unprivileged
+user has already exploited it; that's the PoC step's job, not the
+audit's.
 
-Update this section directly when the range's host list changes (a
-host added, retired, or re-IP'd) — no code changes should be needed
-anywhere else; `hosts.json` is the source of truth the scripts actually
-read, so update that file too, not just this prose summary of it.
+Update this section directly when the range's host list changes — no
+code changes should be needed anywhere else; `hosts.json` is the
+source of truth the scripts actually read, so update that file too.

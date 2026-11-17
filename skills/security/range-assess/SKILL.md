@@ -175,24 +175,42 @@ nothing to build by hand in the traversal flow. State persists in
 `ctf_traversal.py` locks its own state — a separate `.lock` file held
 for the whole load-modify-save span of every subcommand.
 
-**`next` walks ONE host at a time, in config order, to completion**
-before moving to the next host's `clone_and_scan` — not round-robin
-across hosts, and not round-robin across a single host's findings
-either: it returns the first non-terminal finding in discovery order
-and won't surface a later finding until that one reaches a terminal
-status (`poc_not_reachable`, `poc_inconclusive`, `reverified_closed`,
-or `review_needed`). This is deliberate, same principle as
-`ctf_traversal.py`'s own single-problem-at-a-time handoff — it keeps
-exactly one thing in flight per host at any moment.
+**Revised from the original design, after a real 21-host run exposed
+two problems with it.** `next` used to walk ONE host at a time, in
+config order, to a terminal status (or `review_needed`) before ever
+issuing the next host's `clone_and_scan` — and a finding stuck at
+`reverify_failed` had no resolution command at all. Combined, a single
+stuck finding on host 3 would have silently halted hosts 4 through 21
+forever; it never happened in that run purely by luck (25/25 reverifies
+succeeded), not because the design prevented it.
+
+`next` now still hands you ONE thing at a time (unchanged for solo,
+non-delegated use), but:
+- a `remediation_planned` finding (a `report-remediate` call where
+  `applied` came back false) is retried automatically as
+  `assign_remediate` up to a cap, instead of being silently skipped
+  forever;
+- `reverify_failed`, and `remediation_planned` past its retry cap, are
+  surfaced as **non-blocking** `review_needed` notices — collected
+  separately and reported once nothing else is left to do, never
+  instead of a real host's actionable work. `next` will keep advancing
+  through every other host regardless of how many findings are stuck
+  in review;
+- `resolve-review --vmid <golden_vmid> --finding <finding_id>
+  --resolution accept_risk|retry|closed_manually [--note <text>]` is
+  the only sanctioned way to close a review item — same principle
+  AGENTS.md already states for `.ctf_traversal_state.json`: nothing but
+  this script's own commands touches a tracked status.
 
 `next`'s possible actions: `clone_and_scan`, `local_audit`,
-`assign_poc`, `assign_remediate`, `assign_reverify`, `review_needed`,
-or `{"done": true}`. `review_needed` means a remediation did not close
-the finding on reverify (`reverify_failed`) — read `status` for that
-finding's existing `remediation_summary`/evidence before trying
-`assign-remediate` again, so the next attempt is actually informed by
-what didn't work the first time, not a repeat of the identical
-proposal.
+`assign_poc`, `assign_remediate` (first attempt or a retry — check for
+a `"retry": true` field), `assign_reverify`, or `{"done": true}` /
+`{"done_pending_review": true, "review_needed": [...]}`. A
+`done_pending_review` result means every host has either finished or
+has nothing left but review items — read each one's `note`, call
+`status` for the finding's full `remediation_summary`/`risk_notes`,
+then `resolve-review` once a human/operator has actually decided what
+to do with it.
 
 **`next` deliberately does not drive the clone/start step itself** —
 unlike ksnctf's near-free "fetch the next problem," cloning a Proxmox VM
@@ -202,6 +220,88 @@ rather than a step it drives. When `next` returns
 `{"action": "clone_and_scan", ...}`, that's your cue to call
 `proxmox_bridge.py` directly, then `record-scan` once the clone is
 reachable.
+
+## Delegating to subagents (`next-batch`, when driving more than one host at once)
+
+**Why this exists**: a real 21-host sweep driven by `next` alone, one
+action at a time, took 5 days — every PoC/remediate action is its own
+full agent turn (real exploitation/remediation attempts over SSH or
+network access, not a cheap lookup), and `next`'s one-at-a-time
+handoff means the GPU sits idle during every tool-call round-trip
+(an SSH command, an `nmap`/`sqlmap` run) while the primary waits.
+
+**What delegation actually buys here, and what it doesn't**: measured
+directly (`scripts/measure-ollama-concurrency.sh`) against this
+project's delegation model — see `config/config.yaml`'s `delegation:`
+block comment for the full numbers — concurrent requests did NOT
+increase real token-generation throughput; this hardware time-slices
+GPU decode across concurrent requests rather than batching them, so
+aggregate tokens/sec stayed flat from 3-way through 16-way concurrency.
+**Do not delegate range-assess work expecting N subagents to "think" N
+times faster in aggregate — they won't.** The real win is structural:
+a PoC/remediate subagent's wall-clock time is dominated by tool-call
+waits (SSH/nmap/sqlmap round-trips), not generation — so while one
+subagent is blocked on its own tool call, a different subagent's
+reasoning turn can use the GPU instead of it sitting idle. That's an
+I/O-overlap gain, not a throughput multiplier, and it's the only gain
+delegation is actually expected to produce here.
+
+**How to actually delegate** — claim several ready actions at once
+instead of calling `next` in a loop yourself:
+
+```
+python3 scripts/range_traversal.py next-batch --count <N> --claimant <id>
+```
+
+Returns up to `N` currently-unclaimed actions (across ALL hosts —
+once a host's scan+audit are done, several of its findings can be
+independently actionable at once, not just actions on different
+hosts), each already marked claimed by `<id>` so a different
+concurrent caller gets offered something else instead of colliding on
+the same work. Hand each claimed action to its own `delegate_task`
+subagent (one action per subagent call) — the two-phase assign/report
+shape is unchanged; a delegated subagent calls `assign-*` then does
+the real work then calls `report-*` exactly as a non-delegated turn
+would. `report-*` clears the claim automatically as part of recording,
+whoever ends up holding it.
+
+**`--count` is NOT scoped to a host or finding set — size it to what
+you actually intend to claim right now.** This happened for real: a
+`--count 97` meant to grab one specific finding on one host instead
+swept up 96 unrelated, already-discovered findings on a different
+host that happened to be queued ahead of it — all correctly leased
+under `ACTION_LEASE_TIMEOUT_SECONDS`, all needing manual
+`release-claim` calls to undo. `next-batch` has no `--host`/`--finding`
+filter; it just returns the first `N` currently-unclaimed actions
+across the whole range, in whatever order the engine enumerates them.
+If you want a specific action, use `assign-poc`/`assign-remediate`
+directly (or `next` once, inspect what it returns, `release-claim` if
+it's not what you wanted) rather than `next-batch` with a count picked
+to "probably" land on it.
+
+**If a subagent dies or times out without ever reporting**, its claim
+expires on its own after `ACTION_LEASE_TIMEOUT_SECONDS` (30 minutes,
+in `range_traversal.py`) and becomes claimable again — or release it
+immediately instead of waiting out the timeout:
+
+```
+python3 scripts/range_traversal.py release-claim --vmid <golden_vmid> [--finding <finding_id>]
+```
+
+(omit `--finding` to release a host-level `clone_and_scan`/`local_audit`
+claim instead of a finding-level one.)
+
+**Match `--count` to `delegation.max_concurrent_children` in
+`config.yaml`** (currently 6) — claiming more than that just means some
+claimed actions sit waiting for a free subagent slot instead of being
+worked immediately, with no benefit over claiming fewer at a time.
+
+**Validate on 2-3 hosts before trusting this across a full rerun** —
+same discipline as everything else in this skill: confirm claimed
+actions land on genuinely different hosts/findings (not the same one
+twice), that a subagent's `report-*` call actually clears its claim,
+and that `status` reflects what you expect, before relying on this at
+the full 21-host scale.
 
 ## Cloning: always background it, and never assume a failed call means a failed clone
 
@@ -342,6 +442,22 @@ at once:
    from a different call's error text — see that endpoint's own
    comment), and that `reset-host` followed by `next` correctly
    re-issues `clone_and_scan` rather than reusing the stale vmid.
+8. **The lease/retry/review mechanism and `next-batch` delegation**
+   (added after the first real 21-host run, not part of the original
+   validation list above) — the claim/release/next-batch mechanics are
+   now confirmed against real concurrent `delegate_task` subagents
+   (disjoint host-level claims, genuine wall-clock overlap — not
+   synthetic fixtures; see `CHANGELOG.md` for details), AND
+   `report-poc` clearing a real **per-finding** claim
+   (`"<vmid>:<finding_id>"`, not just a host-level one) has now been
+   confirmed too — see the `--count` caveat above, discovered during
+   that same real run. Still not exercised: `report-remediate` clearing
+   a claim, a real remediation genuinely hitting its retry cap
+   (`MAX_REMEDIATION_ATTEMPTS`) under real, not synthetic,
+   `applied: false` results, and all three `resolve-review` resolutions
+   against real (not synthetic) findings. `delegation.max_concurrent_children: 10`
+   in `config.yaml` is a conservative setting, not the hardware's real
+   ceiling — see `CHANGELOG.md` for the measurement behind it.
 
 ## Extending `proxmox_bridge.py`'s golden-image guard
 

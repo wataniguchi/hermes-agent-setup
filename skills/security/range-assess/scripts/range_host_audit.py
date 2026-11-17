@@ -63,8 +63,31 @@ Usage:
 Outputs: {"working_vmid": N, "reachable": bool, "os": "...",
           "findings": [{"category": "...", "description": "...",
                          "command": "...", "exit_code": N,
-                         "output": "...", "truncated": bool}],
+                         "output": "...", "item": "..." | null,
+                         "truncated": bool}],
           "errors": ["per-check failures that didn't abort the audit"]}
+
+PER-ITEM SPLITTING: a category whose raw output genuinely bundles
+several independently-actionable things (e.g. `sudoers` capturing four
+separate NOPASSWD grants in one blob, `listening_sockets` capturing
+every open port in one blob) previously became exactly ONE finding per
+host per category — making selective remediation of just one grant or
+one socket impossible, and making range_traversal.py's finding_id()
+(hashed on category+command) collide across genuinely distinct items.
+SPLITTERS/WINDOWS_SPLITTERS below opt specific categories into emitting
+one finding per parsed item instead (each carrying that item's own text
+in the new "item" field, used both for display and for a stable,
+item-specific finding_id downstream). This is deliberately NOT applied
+to every category: a splitter is only as safe as the output format it
+assumes, and a wrong split (silently merging or fabricating item
+boundaries) is worse than staying bundled. Categories left unsplit here
+(os_release, packages_dpkg/rpm, sensitive_file_perms, cron_system,
+systeminfo, hotfixes, service_binary_paths, always_install_elevated)
+are either pure inventory, not individually actionable, or have output
+too heterogeneous to split with a one-line-per-item heuristic — if a
+real audit run shows a specific one of these would clearly benefit,
+extend SPLITTERS/WINDOWS_SPLITTERS for it, don't force a generic parser
+across the board.
 
 Pass --ssh-identity to use a non-default private key; otherwise `ssh`
 resolves its own default identity (e.g. ~/.ssh/id_ed25519) the normal
@@ -228,6 +251,109 @@ def truncate(text: str) -> tuple[str, bool]:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]", True
 
 
+def _nonblank(lines):
+    return [l for l in lines if l.strip()]
+
+
+def split_find_paths(output: str) -> list[str]:
+    """One finding per path line from `find`. Drops find's own
+    stderr-merged noise ("find: '/proc/...': No such file or
+    directory") rather than treating it as a real path."""
+    return [l for l in _nonblank(output.splitlines()) if not l.strip().startswith("find:")]
+
+
+def split_sudoers(output: str) -> list[str]:
+    """One finding per actual sudo rule line — drops comments/blanks
+    from the concatenated sudoers + sudoers.d output."""
+    return [l for l in _nonblank(output.splitlines()) if not l.strip().startswith("#")]
+
+
+def split_listening_sockets(output: str) -> list[str]:
+    """One finding per socket line from `ss -tlnp`/`netstat -tlnp` —
+    drops whichever tool's own header line is present."""
+    items = []
+    for l in _nonblank(output.splitlines()):
+        if l.strip().startswith(("State", "Active Internet", "Proto ")):
+            continue
+        items.append(l)
+    return items
+
+
+def split_grep_lines(output: str) -> list[str]:
+    """One finding per matched line — already one account per line for
+    the shell_users check."""
+    return _nonblank(output.splitlines())
+
+
+def split_cron_user(output: str) -> list[str]:
+    """cron_user's command prints '== <user> ==' markers between each
+    user's crontab. Attributes each non-empty entry to the user whose
+    block it fell under, so a splitter restart doesn't lose that
+    context."""
+    items = []
+    current_user = None
+    for l in _nonblank(output.splitlines()):
+        s = l.strip()
+        if s.startswith("==") and s.endswith("=="):
+            current_user = s.strip("= ").strip()
+            continue
+        items.append(f"[{current_user}] {l}" if current_user else l)
+    return items
+
+
+def split_systemctl_units(output: str) -> list[str]:
+    """One finding per unit line from `systemctl list-units` — keeps
+    only lines whose first token looks like a real unit name
+    (name.service/.socket/.timer/.mount/.target), which skips the
+    header row and the trailing 'N loaded units listed.' line without
+    needing to assume a fixed column count. Conservative on purpose: if
+    the fallback `service --status-all` form is in use instead (no
+    unit-suffixed first token), this returns nothing and the category
+    stays bundled rather than guessing at that format's shape."""
+    items = []
+    for l in _nonblank(output.splitlines()):
+        first = l.split()[0] if l.split() else ""
+        if first.endswith((".service", ".socket", ".timer", ".mount", ".target")):
+            items.append(l)
+    return items
+
+
+def split_table_rows(output: str) -> list[str]:
+    """One finding per data row from a PowerShell `Select-Object ... |
+    Out-String` table: header line, then a dashes line, then one row
+    per remaining line. Assumes no cell wraps (Out-String -Width 300
+    makes that unlikely for this check list's column widths) — if a
+    future check's values are long enough to wrap, this will
+    under-split rather than fabricate a boundary, which is the safer
+    failure direction."""
+    lines = _nonblank(output.splitlines())
+    return lines[2:] if len(lines) > 2 else []
+
+
+# Per-category splitter, Linux checks. Absent from this dict == stays
+# one bundled finding per host per category, same as before.
+SPLITTERS = {
+    "suid_binaries": split_find_paths,
+    "sgid_binaries": split_find_paths,
+    "world_writable_files": split_find_paths,
+    "world_writable_dirs": split_find_paths,
+    "sudoers": split_sudoers,
+    "listening_sockets": split_listening_sockets,
+    "shell_users": split_grep_lines,
+    "cron_user": split_cron_user,
+    "running_services": split_systemctl_units,
+}
+
+# Same idea, Windows checks — kept as a separate dict since "running_services"
+# means a different command/format on this side.
+WINDOWS_SPLITTERS = {
+    "running_services": split_table_rows,
+    "listening_ports": split_table_rows,
+    "scheduled_tasks": split_table_rows,
+    "local_admins": split_table_rows,
+}
+
+
 def cmd_audit(args):
     if args.working_vmid == args.golden_vmid:
         print(json.dumps({
@@ -263,6 +389,8 @@ def cmd_audit(args):
         }, indent=2))
         return
 
+    splitters = SPLITTERS if args.os == "Linux" else WINDOWS_SPLITTERS
+
     findings = []
     errors = []
     for category, argv, description in checks:
@@ -276,14 +404,38 @@ def cmd_audit(args):
             continue
 
         output, truncated = truncate(result["stdout"] + result["stderr"])
-        findings.append({
-            "category": category,
-            "description": description,
-            "command": " ".join(argv),
-            "exit_code": result["exitcode"],
-            "output": output,
-            "truncated": truncated,
-        })
+
+        items = []
+        splitter = splitters.get(category)
+        if splitter:
+            try:
+                items = splitter(output)
+            except Exception as e:
+                errors.append(f"{category}: splitter failed ({e}) — falling back to one bundled finding")
+                items = []
+
+        if items:
+            for item_text in items:
+                item_display, item_truncated = truncate(item_text)
+                findings.append({
+                    "category": category,
+                    "description": description,
+                    "command": " ".join(argv),
+                    "exit_code": result["exitcode"],
+                    "output": item_display,
+                    "item": item_text,
+                    "truncated": item_truncated,
+                })
+        else:
+            findings.append({
+                "category": category,
+                "description": description,
+                "command": " ".join(argv),
+                "exit_code": result["exitcode"],
+                "output": output,
+                "item": None,
+                "truncated": truncated,
+            })
 
     print(json.dumps({
         "working_vmid": args.working_vmid, "reachable": True, "os": args.os,

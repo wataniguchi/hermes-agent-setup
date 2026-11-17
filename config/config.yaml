@@ -18,13 +18,28 @@ model:
   #   >>> /save qwen3.8:27b-96k
   #   >>> /bye
 
-# Subagent delegation. Both primary and fast model are served by the same
-# Ollama instance — unlike a per-model-process backend, one endpoint here
-# covers both; only the model name differs.
+# Subagent delegation. Both primary and delegation model are served by
+# the same Ollama instance — unlike a per-model-process backend, one
+# endpoint here covers both; only the model name differs.
+#
+# num_ctx MUST be 65536 — Hermes refuses delegate_task outright against
+# any model served under a 64K context window. Resident at this
+# context: 16GB, flat through at least 10-way concurrent use, no swap
+# growth under load. See CHANGELOG.md for why/how this was settled and
+# skills/security/range-assess/SKILL.md's delegation section for what
+# concurrency does and doesn't buy here.
+#
+# Create this tag if it doesn't exist yet (same pattern as the primary's
+# qwen3.8:27b-96k above, a smaller quant instead of a larger one — see
+# scripts/setup-ollama-models.sh):
+#   ollama run hf.co/Chungulus/Qwen3.8-27B-Q3_K_M-GGUF:latest
+#   >>> /set parameter num_ctx 65536
+#   >>> /save qwen3.8:27b-delegate
+#   >>> /bye
 delegation:
-  model: gemma4:e4b
+  model: qwen3.8:27b-delegate
   base_url: http://localhost:11434/v1
-  max_concurrent_children: 3
+  max_concurrent_children: 10
 
 # Real Discord config shape (confirmed against cli-config.yaml.dist).
 discord:

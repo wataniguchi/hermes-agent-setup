@@ -33,6 +33,14 @@ KEY_PATTERNS=(
   "session-exports/"
   "writeups/"
   "skill-improvement-notes"
+  # range-assess extension — the underlying tar already captures all of
+  # workspace/ regardless, but this self-check previously only knew
+  # about CTF-shaped filenames, so it could never confirm range-assess
+  # content specifically landed in a given backup.
+  "range_traversal_state"
+  "range_context_"
+  "remediation_result_"
+  "findings_report"
 )
 
 cmd_backup() {
