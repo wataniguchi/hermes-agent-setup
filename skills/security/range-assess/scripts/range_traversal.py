@@ -109,9 +109,20 @@ import subprocess
 import sys
 import time
 
-STATE_PATH = "/workspace/.range_traversal_state.json"
+# Normally "/workspace" — the real mount point inside the hermes sandbox,
+# where every script in this skill actually runs. RANGE_WORKSPACE lets a
+# READ-ONLY command (status/next) be invoked safely from OUTSIDE the
+# sandbox too — e.g. by range-sweep-watchdog.sh on the host, to check
+# whether a sweep has genuinely finished before deciding whether to
+# relaunch — without that invocation silently reading/writing a real
+# "/workspace" directory that happens to exist on the host's own
+# filesystem root, which would be a correctness and safety hazard, not
+# just a wrong-answer one. Unset (the sandbox's own case): behavior is
+# unchanged from before this existed.
+WORKSPACE_DIR = os.environ.get("RANGE_WORKSPACE", "/workspace")
+STATE_PATH = os.path.join(WORKSPACE_DIR, ".range_traversal_state.json")
 STATE_LOCK_PATH = STATE_PATH + ".lock"
-CONTEXT_DIR = "/workspace"
+CONTEXT_DIR = WORKSPACE_DIR
 
 MAX_REMEDIATION_ATTEMPTS = 3
 ACTION_LEASE_TIMEOUT_SECONDS = 1800  # 30 min; a dead claimant's work becomes reclaimable after this
@@ -169,8 +180,18 @@ def finding_description(finding: dict) -> str:
     return finding.get("description") or f"{finding.get('category')}: {finding.get('command')}"
 
 
-def context_path(finding_id_: str, kind: str) -> str:
-    return os.path.join(CONTEXT_DIR, f".range_context_{finding_id_}_{kind}.json")
+def context_path(vmid: str, finding_id_: str, kind: str) -> str:
+    # vmid-scoped on purpose: finding_id is a hash of (scope, port, proto,
+    # service) or (scope, category, command) ALONE — never host or vmid —
+    # so two unrelated findings on different hosts can share the identical
+    # ID (confirmed for real: 9102's benign nginx redirect and 9103's
+    # critical hr-news RCE both landed f-3b4c7dfc21). Before this fix, this
+    # filename had no vmid in it at all, so whichever host's assign-poc/
+    # assign-remediate ran LAST silently overwrote the other's context —
+    # confirmed for real when 9102's nginx context was clobbered by 9103's
+    # Apache one on disk, during the same real 3-host run that surfaced the
+    # collision in the first place.
+    return os.path.join(CONTEXT_DIR, f".range_context_{vmid}_{finding_id_}_{kind}.json")
 
 
 def write_context(path: str, data: dict):
@@ -178,17 +199,69 @@ def write_context(path: str, data: dict):
         json.dump(data, f, indent=2)
 
 
-def cmd_init(config_path: str):
+def cmd_init(config_path: str, hosts_filter: str = None, fresh: bool = False):
     if not os.path.isfile(config_path):
         print(json.dumps({"initialized": False, "reason": f"--config path does not exist: {config_path!r}"}, indent=2))
         sys.exit(1)
     with open(config_path) as f:
         cfg = json.load(f)
 
+    # --hosts lets you scope a run to a subset of --config's hosts without
+    # maintaining a separate trimmed config file. Found necessary for real:
+    # a 3-host exercise was pointed at a genuinely trimmed 3-host config
+    # file, but the state file still held an old 21-host sweep's state —
+    # see the --fresh/stale-host guard below for why that no longer
+    # silently happens either way.
+    requested_vmids = None
+    if hosts_filter:
+        requested_vmids = [v.strip() for v in hosts_filter.split(",") if v.strip()]
+        missing = [v for v in requested_vmids if v not in cfg.get("hosts", {})]
+        if missing:
+            print(json.dumps({
+                "initialized": False,
+                "reason": f"--hosts referenced vmid(s) not present in --config's hosts: {missing}",
+            }, indent=2))
+            sys.exit(1)
+        hosts_to_seed = {v: cfg["hosts"][v] for v in requested_vmids}
+    else:
+        hosts_to_seed = cfg.get("hosts", {})
+
     with state_lock():
-        state = load_state() if os.path.isfile(STATE_PATH) else {"config_path": config_path, "hosts": {}}
+        existing_state = load_state() if os.path.isfile(STATE_PATH) else None
+        existing_vmids = set(existing_state["hosts"].keys()) if existing_state else set()
+        # init has always been additive-only by design (setdefault everywhere
+        # below) so that re-running it mid-sweep to add a host never clobbers
+        # progress on the others. That same design silently let a SMALLER,
+        # differently-scoped run (e.g. --hosts/a trimmed --config meant to
+        # limit a sweep to 3 hosts) inherit a stale LARGER state file's hosts
+        # with zero indication it had happened — confirmed for real when a
+        # 3-host exercise came back covering all 21 hosts from an old sweep's
+        # state file that had never actually been cleared. Refuse instead of
+        # silently merging whenever this init's host set doesn't match what's
+        # already on disk; --fresh is the explicit opt-in to wipe and replace.
+        stale_vmids = sorted(existing_vmids - set(hosts_to_seed.keys()))
+        if stale_vmids and not fresh:
+            print(json.dumps({
+                "initialized": False,
+                "reason": (
+                    f"Existing state already has {len(existing_vmids)} host(s), including "
+                    f"{len(stale_vmids)} NOT in this init's host set. init never truncates "
+                    "state on its own, so proceeding would silently pull those stale hosts "
+                    "into scope alongside whatever you're seeding now. Pass --fresh to wipe "
+                    "the existing state and start clean with exactly this host set, or "
+                    "re-run init with the full/matching host set if you actually meant to "
+                    "resume the existing, larger sweep."
+                ),
+                "existing_hosts": sorted(existing_vmids),
+                "stale_hosts": stale_vmids,
+            }, indent=2))
+            sys.exit(1)
+
+        state = {"config_path": config_path, "hosts": {}} if fresh else (
+            existing_state if existing_state is not None else {"config_path": config_path, "hosts": {}}
+        )
         state["config_path"] = config_path
-        for vmid, host_cfg in cfg.get("hosts", {}).items():
+        for vmid, host_cfg in hosts_to_seed.items():
             rec = state["hosts"].setdefault(vmid, {})
             rec.setdefault("host", host_cfg["host"])
             rec.setdefault("os", host_cfg["os"])
@@ -205,6 +278,8 @@ def cmd_init(config_path: str):
     print(json.dumps({
         "initialized": True,
         "total_hosts": len(state["hosts"]),
+        "fresh": fresh,
+        "hosts_filtered_from_config": requested_vmids is not None,
         "note": "Each host still needs its working clone (<host>-ctf) created and started "
                 "via proxmox_bridge.py's /vm/clone and /vm/{vmid}/start BEFORE record-scan "
                 "can run against it — that lifecycle step is intentionally outside this "
@@ -323,6 +398,31 @@ def _clear_claim(state: dict, key: str):
 
 def _strip_key(action: dict) -> dict:
     return {k: v for k, v in action.items() if k != "key"}
+
+
+def cmd_is_done():
+    """Read-only completion check: same `all_actions` logic `next` uses to
+    decide whether anything is left to do, but NEVER claims an action or
+    writes state — unlike `next`, safe to call speculatively, any number
+    of times, with no risk of colliding with a real in-progress claim.
+    Exists specifically for range-sweep-watchdog.sh (run with RANGE_WORKSPACE
+    set, from outside the sandbox) to check whether a sweep has genuinely
+    finished before deciding whether to relaunch — confirmed for real that
+    without this, the watchdog kept relaunching a finished sweep (exit code
+    0, `done_pending_review: true`, clones already destroyed) exactly like
+    a crash, because it had no way to tell the two apart."""
+    now = time.time()
+    state = load_state()
+    actions, review = all_actions(state)
+    pending = [a for a in actions if not _claim_active(state, a["key"], now)]
+    done = not pending and not review
+    done_pending_review = not pending and bool(review)
+    print(json.dumps({
+        "done": done,
+        "done_pending_review": done_pending_review,
+        "pending_actions": len(pending),
+        "review_needed": [_strip_key(r) for r in review] if done_pending_review else [],
+    }, indent=2))
 
 
 def cmd_next():
@@ -504,7 +604,7 @@ def cmd_assign_poc(vmid: str, fid: str, poc_script: str, max_attempts: int, time
         context["prior_poc_method"] = finding.get("poc_method", "")
         context["prior_poc_evidence"] = finding.get("poc_evidence", "")
         context["remediation_summary"] = finding.get("remediation_summary", "")
-    ctx_path = context_path(fid, "poc")
+    ctx_path = context_path(vmid, fid, "poc")
     write_context(ctx_path, context)
 
     args = [
@@ -580,7 +680,7 @@ def cmd_assign_remediate(vmid: str, fid: str, remediate_script: str, dry_run: bo
         "target": rec["last_scan_target"] or rec["ipv4"],
         "poc_evidence": finding["poc_evidence"], "poc_method": finding["poc_method"],
     }
-    ctx_path = context_path(fid, "remediate")
+    ctx_path = context_path(vmid, fid, "remediate")
     write_context(ctx_path, context)
 
     args = [
@@ -734,7 +834,6 @@ def cmd_resolve_review(vmid: str, fid: str, resolution: str, note: str):
             new_status = "closed_manually"
         else:  # "retry"
             finding["remediation_attempts"] = 0
-            finding["needs_operator_decision"] = False
             # reverify_failed means the APPLIED remediation didn't hold —
             # retry from poc_confirmed so a fresh fix is proposed, not a
             # repeat of the same one. A stalled remediation_planned just
@@ -742,6 +841,12 @@ def cmd_resolve_review(vmid: str, fid: str, resolution: str, note: str):
             # host_action_list() will retry it on its own.
             new_status = "poc_confirmed" if prior_status == "reverify_failed" else "remediation_planned"
         finding["status"] = new_status
+        # The operator decision is now made, whichever way it went —
+        # accept_risk and closed_manually are just as final as retry's
+        # reset. Leaving this true after a terminal resolution meant a
+        # resolved finding kept showing up in any needs_operator_decision
+        # filter forever, as if it were still waiting on you.
+        finding["needs_operator_decision"] = False
         finding["operator_note"] = note or finding.get("operator_note", "")
         _clear_claim(state, f"{vmid}:{fid}")
         save_state(state)
@@ -779,8 +884,17 @@ def main():
 
     p_init = sub.add_parser("init")
     p_init.add_argument("--config", required=True)
+    p_init.add_argument("--hosts", default=None,
+                         help="comma-separated subset of --config's vmids to seed, e.g. "
+                              "9101,9102,9103 — omit to use every host in --config")
+    p_init.add_argument("--fresh", action="store_true",
+                         help="wipe any existing state and start clean with exactly this "
+                              "init's host set. Required if existing state already has "
+                              "host(s) outside that set — init refuses to silently merge "
+                              "a smaller/different run onto a stale larger state file")
 
     sub.add_parser("next")
+    sub.add_parser("is-done")
 
     p_nb = sub.add_parser("next-batch")
     p_nb.add_argument("--count", type=int, required=True, help="max number of actions to claim")
@@ -849,9 +963,11 @@ def main():
 
     args = parser.parse_args()
     if args.command == "init":
-        cmd_init(args.config)
+        cmd_init(args.config, args.hosts, args.fresh)
     elif args.command == "next":
         cmd_next()
+    elif args.command == "is-done":
+        cmd_is_done()
     elif args.command == "next-batch":
         cmd_next_batch(args.count, args.claimant)
     elif args.command == "release-claim":

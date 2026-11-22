@@ -107,13 +107,30 @@ golden vmid instead is hard to cross-reference against it later:
 }
 ```
 
-Then call:
+Then call — **use `range_traversal.py report-poc`, NOT `range_poc.py
+report` directly**, if you got this prompt from `range_traversal.py
+assign-poc` (true for virtually every real run, including any
+multi-host sweep): calling the bare script directly only writes to its
+own private log and never updates the tracked finding status, so
+`next`/`status` would keep treating this finding as unresolved forever
+even after a genuine confirm/non-reachable result.
 
 ```
-python3 .../range_poc.py report \
-    --golden-vmid {{golden_vmid}} --working-vmid {{working_vmid}} \
-    --finding-id {{finding_id}} --result-file <path to the JSON file above>
+python3 .../range_traversal.py report-poc \
+    --vmid {{golden_vmid}} --finding {{finding_id}} \
+    --poc-script .../range_poc.py \
+    --result-file <path to the JSON file above> \
+    [--reverify, if this prompt carried a REVERIFICATION banner above]
 ```
+
+(`report-poc` calls `range_poc.py report` internally for you, so the
+same validation/logging below still happens — it just also advances
+the real, tracked state.) Call `range_poc.py report` directly, with
+`--golden-vmid {{golden_vmid}} --working-vmid {{working_vmid}}`, ONLY
+in the rare case where you're working this single host completely
+outside `range_traversal.py` (no traversal state exists for it at
+all) — see `SKILL.md`'s "single host, one pass through the loop"
+section.
 
 That call is what actually validates and logs your result — writing
 the JSON file yourself is not the final step. (It also saves a

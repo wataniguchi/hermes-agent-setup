@@ -81,13 +81,28 @@ the golden vmid instead is hard to cross-reference against it later:
 }
 ```
 
-Then call:
+Then call — **use `range_traversal.py report-remediate`, NOT
+`range_remediate.py report` directly**, if you got this prompt from
+`range_traversal.py assign-remediate` (true for virtually every real
+run, including any multi-host sweep): calling the bare script directly
+only writes to its own private log and never updates the tracked
+finding status, so `next`/`status` would keep treating this finding as
+still `poc_confirmed` forever even after you've genuinely fixed it.
 
 ```
-python3 .../range_remediate.py report \
-    --golden-vmid {{golden_vmid}} --working-vmid {{working_vmid}} \
-    --finding-id {{finding_id}} --result-file <path to the JSON file above>
+python3 .../range_traversal.py report-remediate \
+    --vmid {{golden_vmid}} --finding {{finding_id}} \
+    --remediate-script .../range_remediate.py \
+    --result-file <path to the JSON file above>
 ```
+
+(`report-remediate` calls `range_remediate.py report` internally for
+you, so the same validation/logging below still happens — it just also
+advances the real, tracked state.) Call `range_remediate.py report`
+directly, with `--working-vmid {{working_vmid}}` added, ONLY in the
+rare case where you're working this single host completely outside
+`range_traversal.py` (no traversal state exists for it at all) — see
+`SKILL.md`'s "single host, one pass through the loop" section.
 
 That call is what actually validates and logs your result — writing
 the JSON file yourself is not the final step. (It also saves a

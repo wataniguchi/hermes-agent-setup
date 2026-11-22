@@ -81,9 +81,24 @@ def resolve_file(workspace, prefix, working_vmid, fid):
     return None, "MISSING"
 
 
-def resolve_context(workspace, fid, kind):
-    path = os.path.join(workspace, f".range_context_{fid}_{kind}.json")
-    return path if os.path.isfile(path) else None
+def resolve_context(workspace, vmid, fid, kind):
+    # vmid-scoped (see range_traversal.py's context_path for why — the
+    # unscoped name let two hosts sharing a finding_id silently overwrite
+    # each other's context on disk, confirmed for real). Falls back to the
+    # old unscoped name for context files written before this fix, same
+    # as resolve_file()'s stale-vmid fallback below — but a hit there
+    # could be either host's content, so it's flagged, not trusted.
+    canonical = os.path.join(workspace, f".range_context_{vmid}_{fid}_{kind}.json")
+    if os.path.isfile(canonical):
+        return canonical, None
+    legacy = os.path.join(workspace, f".range_context_{fid}_{kind}.json")
+    if os.path.isfile(legacy):
+        return legacy, (
+            "UNSCOPED legacy filename — if this finding_id occurs on more "
+            "than one host, this may actually be a DIFFERENT host's "
+            "context, silently overwritten before vmid-scoping was added."
+        )
+    return None, None
 
 
 def resolve_sandbox_path(workspace, path):
@@ -132,11 +147,19 @@ def render_finding(workspace, vmid, rec, fid, finding, out):
 
     out.append("\n**Files:**\n")
 
-    poc_ctx = resolve_context(workspace, fid, "poc")
-    out.append(f"- PoC context: `{poc_ctx}`" if poc_ctx else "- PoC context: *not found*")
+    poc_ctx, poc_ctx_note = resolve_context(workspace, vmid, fid, "poc")
+    if poc_ctx:
+        suffix = f"  ⚠️ {poc_ctx_note}" if poc_ctx_note else ""
+        out.append(f"- PoC context: `{poc_ctx}`{suffix}")
+    else:
+        out.append("- PoC context: *not found*")
 
-    rem_ctx = resolve_context(workspace, fid, "remediate")
-    out.append(f"- Remediation context: `{rem_ctx}`" if rem_ctx else "- Remediation context: *not found (not yet remediated)*")
+    rem_ctx, rem_ctx_note = resolve_context(workspace, vmid, fid, "remediate")
+    if rem_ctx:
+        suffix = f"  ⚠️ {rem_ctx_note}" if rem_ctx_note else ""
+        out.append(f"- Remediation context: `{rem_ctx}`{suffix}")
+    else:
+        out.append("- Remediation context: *not found (not yet remediated)*")
 
     poc_path, poc_note = resolve_file(workspace, "result", working_vmid, fid)
     if poc_path:

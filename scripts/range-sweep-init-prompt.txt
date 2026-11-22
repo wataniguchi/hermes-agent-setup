@@ -1,9 +1,37 @@
-Start a fresh, fully autonomous range-assessment sweep using the
-range-assess skill against your range (host inventory at
+Run a fully autonomous range-assessment sweep using the range-assess
+skill against your range (host inventory at
 /root/.hermes/skills/security/range-assess/config/hosts.json — your own
 real, filled-in copy, not the sanitized template this skill ships
-with). Workspace and history have been cleared — this is a genuinely
-clean start, zero hosts assessed yet.
+with).
+
+This exact prompt is resent verbatim every time this process restarts
+(crash, context limit, anything) — including hours into an
+already-productive run with real findings and real remediation
+progress already on disk. It is NOT a claim that this is a fresh
+start; that was only ever true the very first time. **Before doing
+anything else, check which situation you're actually in:**
+
+    python3 /root/.hermes/skills/security/range-assess/scripts/range_traversal.py status
+
+If `status` already shows tracked hosts/findings, this is a RESTART of
+an in-progress run, not a fresh launch — skip STEP 1 entirely and go
+straight to STEP 2's loop (`next`), picking up exactly where the prior
+instance left off. The state is file-backed for exactly this reason.
+
+Only run STEP 1's `init` below if `status` shows no tracked state at
+all (genuinely empty or the state file doesn't exist yet).
+
+**Never pass `--fresh` or `--hosts` on your own judgment, under any
+circumstance, including to get past a refusal.** Confirmed from a real
+run: hours of real findings and remediation progress across 3 hosts
+were wiped back to zero this way — most likely `init` re-run (because
+this same prompt looks identical on every restart) hit the stale-host
+guard or was simply taken at face value, and `--fresh` was added to
+push through. If `init` ever refuses for any reason, that is not
+something to work around — stop, report the exact refusal reason in
+your final summary, and let the operator decide. Wiping tracked state
+is the operator's call alone, never yours, no matter how confident the
+reasoning feels in the moment.
 
 Division of labor, stated once so it's never ambiguous mid-loop: NO
 script in this skill ever calls a model. range_traversal.py only tracks
@@ -133,6 +161,21 @@ other than range_traversal.py's own commands. You have no authority to
 force a finding's status or bypass an attempt cap yourself, no matter
 how confident the judgment feels — identical standing rule to the
 ksnctf sweep's own, for the identical reason.
+
+Never call `resolve-review` yourself, no matter how clearly the right
+call seems. Confirmed from a real unattended run: the agent called
+`resolve-review --resolution accept_risk` on a `needs_operator_decision`
+finding (the standing root-SSH access the assessment's own tooling
+depends on) while no operator was present at all — the reasoning
+happened to be correct that time, but nothing distinguishes "a human
+decided this" from "I decided this and I'm calling myself the human,"
+so there is no safe way for you to make that call. When `next` (or
+`next-batch`) returns `done_pending_review` or any `review_needed`
+item, leave it exactly as `remediation_planned`/`reverify_failed` and
+report it in your final summary with its `remediation_summary` and
+`risk_notes` — do not resolve it, accept it, retry it, or close it
+yourself. The operator runs `resolve-review` themselves, separately,
+once they're actually back.
 
 Never pass a golden VMID as --working-vmid to any script, and never
 act against any address or VM other than the specific working clone's

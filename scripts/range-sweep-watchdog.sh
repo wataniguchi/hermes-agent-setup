@@ -95,6 +95,7 @@ RESTART_DELAY_SECONDS=5
 
 WORKSPACE_DIR="$SCRIPT_DIR/../workspace"
 WORKSPACE_STATE_FILE="$WORKSPACE_DIR/.range_traversal_state.json"
+TRAVERSAL_SCRIPT="$SCRIPT_DIR/../skills/security/range-assess/scripts/range_traversal.py"
 OUTPUT_LOG="$WORKSPACE_DIR/.range-sweep-watchdog-output.log"
 USAGE_FILE="$WORKSPACE_DIR/.range-sweep-last-usage.json"
 SESSION_ID_FILE="$WORKSPACE_DIR/.range-sweep-current-session-id"
@@ -124,6 +125,21 @@ Usage: $0 [-p|--profile <name>] [--init|--resume] [--config <path>] [--no-monito
                           range_traversal.py init) on every attempt,
                           including relaunches. Rarely what you want
                           past attempt #1 — mainly useful for testing.
+                          CONFIRMED FOR REAL: this is NOT a one-time
+                          flag for attempt #1 alone — it stays in force
+                          for every relaunch of THIS watchdog process,
+                          however many hours or restarts later, for as
+                          long as it keeps running. If a later attempt
+                          restarts with real tracked progress already on
+                          disk, this prompt's own "clean start" framing
+                          then contradicts reality, which the agent may
+                          (and, in a real run, did) resolve on its own by
+                          wiping that progress. Use --init only to pick
+                          --config on a genuine first launch; once a
+                          sweep has begun, stop this script and restart
+                          it WITHOUT --init so auto-detect correctly
+                          switches every later attempt to the resume
+                          prompt instead.
 
   --resume               Force the resume prompt on every attempt,
                           including the very first one.
@@ -295,6 +311,34 @@ discover_session_id() {
     return 1
 }
 
+# Confirmed for real: this script used to relaunch unconditionally on
+# ANY exit — crash, Ctrl-C, or a genuinely finished sweep (exit code 0,
+# done_pending_review: true, working clones already destroyed) alike,
+# because exit code alone can't tell "crashed" from "done" apart. That
+# let a clean, correct, fully-complete 269-finding sweep get relaunched
+# into a brand-new attempt one second after it reported itself finished
+# — whose own init/resume prompt then (also confirmed for real) saw
+# real tracked progress sitting right there, asked the operator what to
+# do about the contradiction, got auto-answered in oneshot mode, and
+# wiped it. This check closes the gap at its source: ask
+# range_traversal.py itself, read-only (RANGE_WORKSPACE + `is-done`,
+# which — unlike `next` — never claims an action or writes state, so
+# it's safe to call here even if the sweep ISN'T actually finished),
+# whether anything is actually still pending before relaunching at all.
+sweep_is_complete() {
+    if [[ ! -f "$WORKSPACE_STATE_FILE" ]]; then
+        return 1  # no state yet — never "complete", let it (re)init normally
+    fi
+    local out
+    out="$(RANGE_WORKSPACE="$WORKSPACE_DIR" python3 "$TRAVERSAL_SCRIPT" is-done 2>/dev/null)"
+    [[ -z "$out" ]] && return 1  # couldn't check — fail open to the old behavior, don't block a real resume
+    if print -r -- "$out" | grep -q '"done": true' || print -r -- "$out" | grep -q '"done_pending_review": true'; then
+        echo "$out" | tee -a "$OUTPUT_LOG"
+        return 0
+    fi
+    return 1
+}
+
 build_init_prompt() {
     # The committed init-prompt file's STEP 1 line hardcodes a --config
     # path as a readable example, not your real one. Substitute it here
@@ -385,6 +429,18 @@ while true; do
         echo "--- Last 5 agent.log lines: ---" | tee -a "$OUTPUT_LOG"
         tail -5 "$LOG_DIR"/agent.log 2>/dev/null | tee -a "$OUTPUT_LOG"
         echo "--- end log tail ---" | tee -a "$OUTPUT_LOG"
+    fi
+
+    if sweep_is_complete; then
+        {
+            echo "Sweep is genuinely complete (range_traversal.py is-done confirms it, read-only,"
+            echo "independent of attempt #$attempt's own self-report) — NOT relaunching."
+            echo "Review any review_needed items above, or run:"
+            echo "  python3 $TRAVERSAL_SCRIPT status"
+            echo "To run this range again, start a fresh, differently-scoped sweep deliberately"
+            echo "(archive/clear the workspace first) rather than relying on a restart here."
+        } | tee -a "$OUTPUT_LOG"
+        break
     fi
 
     echo "Resuming in ${RESTART_DELAY_SECONDS}s... (Ctrl-C to stop)"

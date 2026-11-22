@@ -157,7 +157,7 @@ the real work between them is now yours to do, not a blocking call this
 script makes for you.
 
 ```
-python3 scripts/range_traversal.py init --config ../config/hosts.json
+python3 scripts/range_traversal.py init --config ../config/hosts.json [--hosts <vmid1,vmid2,...>] [--fresh]
 python3 scripts/range_traversal.py next
 python3 scripts/range_traversal.py record-scan --vmid <golden_vmid> --working-vmid <id> --target <ip> --discover scripts/range_discover.py
 python3 scripts/range_traversal.py record-audit --vmid <golden_vmid> --working-vmid <id> --target <ip> --audit scripts/range_host_audit.py
@@ -174,6 +174,39 @@ nothing to build by hand in the traversal flow. State persists in
 `/workspace/.range_traversal_state.json`, locked the same way
 `ctf_traversal.py` locks its own state — a separate `.lock` file held
 for the whole load-modify-save span of every subcommand.
+
+**`init` is additive-only by default, and refuses to silently merge
+onto a stale, differently-scoped state file.** Found necessary for
+real: a 3-host exercise pointed at a genuinely trimmed 3-host
+`--config` still came back covering all 21 hosts, because the state
+file at `/workspace/.range_traversal_state.json` already held an
+earlier sweep's full host set and `init`'s own `setdefault`-everywhere
+design (so re-running `init` mid-sweep to add a host never clobbers
+progress on the others) silently kept it. `init` now checks for hosts
+already in state that aren't part of the current `--config`/`--hosts`
+set and refuses with `stale_hosts` listed, unless `--fresh` is passed
+to explicitly wipe and start clean. `--hosts <vmid1,vmid2,...>` scopes
+a run to a subset of `--config`'s hosts without needing a separate
+trimmed config file at all.
+
+**A finding's `f-<hash>` ID is NOT a stable cross-host identifier for
+"this kind of finding" — it only disambiguates findings within one
+host's own scan.** `finding_id()` hashes `(scope, port, proto, service)`
+for a network finding, or `(scope, category, command)` for a local one
+— never the version string, the actual evidence, or the vmid. Confirmed
+for real: two hosts with "port 22/tcp/ssh" open got the identical ID
+despite one being a modern OpenSSH with nothing exploitable
+(`poc_not_reachable`) and the other having a genuinely confirmed
+root-key network login (`remediation_planned`, `needs_operator_decision:
+true`) — same ID, two unrelated findings. This is harmless to the
+pipeline itself (every script keys storage and result files by
+`<vmid or working_vmid>:<finding_id>` together, never by a bare
+`finding_id` alone — see `range_status_report.py`'s own `all_findings`
+loop), but it's a real trap for a human (or a future script) skimming
+state across hosts and assuming the same ID means the same underlying
+condition. Always read a finding's own record (`poc_evidence`,
+`version`, `risk_notes`, etc.) per host before drawing a range-wide
+conclusion from how many hosts share an ID.
 
 **Revised from the original design, after a real 21-host run exposed
 two problems with it.** `next` used to walk ONE host at a time, in
@@ -207,10 +240,22 @@ non-delegated use), but:
 a `"retry": true` field), `assign_reverify`, or `{"done": true}` /
 `{"done_pending_review": true, "review_needed": [...]}`. A
 `done_pending_review` result means every host has either finished or
-has nothing left but review items — read each one's `note`, call
+has nothing left but review items — read each one's `note` and call
 `status` for the finding's full `remediation_summary`/`risk_notes`,
-then `resolve-review` once a human/operator has actually decided what
-to do with it.
+then **stop and report them** in your final summary. Do not call
+`resolve-review` yourself, however clearly the right call seems —
+confirmed for real: in an unattended run, the agent itself called
+`resolve-review --resolution accept_risk` against a `needs_operator_decision`
+finding (the standing root-SSH access channel) while the operator was
+asleep, with reasoning that happened to be sound but with no actual
+operator involved at any point. The phrase "once a human/operator has
+decided" is not a condition the agent can satisfy on its own behalf —
+there is no technical gate separating "a human decided" from "I decided
+and I'm the one calling myself the human who decided," so the only safe
+rule is that the agent never calls `resolve-review`, full stop.
+`resolve-review` is for a human operator to run themselves, after the
+fact, from outside this loop — not something handed back to the agent
+to invoke once it judges the decision made.
 
 **`next` deliberately does not drive the clone/start step itself** —
 unlike ksnctf's near-free "fetch the next problem," cloning a Proxmox VM
@@ -447,17 +492,29 @@ at once:
    validation list above) — the claim/release/next-batch mechanics are
    now confirmed against real concurrent `delegate_task` subagents
    (disjoint host-level claims, genuine wall-clock overlap — not
-   synthetic fixtures; see `CHANGELOG.md` for details), AND
-   `report-poc` clearing a real **per-finding** claim
-   (`"<vmid>:<finding_id>"`, not just a host-level one) has now been
-   confirmed too — see the `--count` caveat above, discovered during
-   that same real run. Still not exercised: `report-remediate` clearing
-   a claim, a real remediation genuinely hitting its retry cap
-   (`MAX_REMEDIATION_ATTEMPTS`) under real, not synthetic,
-   `applied: false` results, and all three `resolve-review` resolutions
-   against real (not synthetic) findings. `delegation.max_concurrent_children: 10`
-   in `config.yaml` is a conservative setting, not the hardware's real
-   ceiling — see `CHANGELOG.md` for the measurement behind it.
+   synthetic fixtures; see `CHANGELOG.md` for details), `report-poc`
+   clearing a real **per-finding** claim (`"<vmid>:<finding_id>"`, not
+   just a host-level one) — see the `--count` caveat above — and now
+   `resolve-review --resolution accept_risk` against a real finding
+   (not a fixture): a genuinely-hardened, legitimately-open SSH service
+   correctly flagged `needs_operator_decision` and closed as
+   `risk_accepted`, with `review_log` recording the resolution. All
+   four claim-clearing report commands and, as of a second real
+   21-host run, **all three** `resolve-review` resolutions are now
+   confirmed real: `retry` correctly reset `remediation_attempts` to 0
+   and `needs_operator_decision` to `false` while leaving status at
+   `remediation_planned` (not `reverify_failed`, so no transition back
+   to `poc_confirmed`), `closed_manually` and `accept_risk` both landed
+   their expected terminal statuses — all three against the same
+   recurring golden-image SSH-root-login finding on three different
+   hosts, deliberately resolved three different ways purely for
+   validation coverage (see `CHANGELOG.range-assess-extension.md`'s
+   eighth/ninth gaps). Still not exercised: a real remediation
+   genuinely hitting its retry cap (`MAX_REMEDIATION_ATTEMPTS`) under
+   real, not synthetic, `applied: false` results.
+   `delegation.max_concurrent_children: 10` in `config.yaml` is a
+   conservative setting, not the hardware's real ceiling — see
+   `CHANGELOG.md` for the measurement behind it.
 
 ## Extending `proxmox_bridge.py`'s golden-image guard
 

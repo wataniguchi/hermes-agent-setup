@@ -142,6 +142,14 @@ def cmd_report(args):
         "reported": True, "finding_id": args.finding_id, "applied": result["applied"],
         "remediation_summary": result.get("remediation_summary", ""),
         "canonical_result_file": canonical_path,
+        # Added after a real bug: range_traversal.py's cmd_report_remediate
+        # reads these two fields from THIS printed dict (it parses this
+        # script's stdout, not the --result-file directly) — without them
+        # here, a genuine "no fix needed, operator must decide" result
+        # silently collapsed into needs_operator_decision: false every
+        # time, indistinguishable from an ordinary retry-pending failure.
+        "needs_operator_decision": bool(result.get("needs_operator_decision", False)),
+        "risk_notes": result.get("risk_notes", ""),
     }, indent=2))
 
 
