@@ -44,10 +44,22 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# This script lives alongside the other operator-facing tools
+# (scripts/), not inside the skill the agent itself uses
+# (skills/security/range-assess/scripts/) - but it still needs
+# range_poc.py's shared constant from there, so point sys.path at the
+# skill's own scripts dir explicitly rather than at this file's own
+# directory.
+_RANGE_ASSESS_SCRIPTS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "skills", "security", "range-assess", "scripts",
+)
+sys.path.insert(0, _RANGE_ASSESS_SCRIPTS)
 from range_poc import MAX_ATTEMPTS_PER_FINDING  # noqa: E402  (shared constant, not duplicated)
+
+JST = timezone(timedelta(hours=9))
 
 
 def load_json(path: str, default):
@@ -148,9 +160,12 @@ def build_report(workspace: str) -> dict:
     timing = None
     if all_timestamps:
         earliest, latest = min(all_timestamps), max(all_timestamps)
+        # Displayed in JST, not UTC — these timestamps are read by an
+        # operator, not fed back into any script, so there's no
+        # machine-readability reason to keep them in UTC.
         timing = {
-            "earliest": datetime.fromtimestamp(earliest, tz=timezone.utc).isoformat(),
-            "latest": datetime.fromtimestamp(latest, tz=timezone.utc).isoformat(),
+            "earliest": datetime.fromtimestamp(earliest, tz=JST).isoformat(),
+            "latest": datetime.fromtimestamp(latest, tz=JST).isoformat(),
             "span_seconds": latest - earliest,
             "span_human": fmt_duration(latest - earliest),
         }
@@ -278,7 +293,7 @@ def print_human_report(report: dict):
     line("Dry-run only (last attempt)", r["dry_run_only"])
     line("needs_operator_decision", r["needs_operator_decision"])
 
-    print("\n-- Timing --")
+    print("\n-- Timing (JST) --")
     t = report["timing"]
     if t:
         line("Earliest logged attempt", t["earliest"])

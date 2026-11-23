@@ -36,6 +36,17 @@
 #     after a crash — status is always exactly as current as the last
 #     command that ran, with no separate self-reported note to verify
 #     or discard.
+#   - Context-compression corruption sweep: on every attempt exit
+#     (clean or interrupted), greps workspace/ for a literal
+#     HERMES-CONTEXT-COMPRESSION marker that may have been spliced into
+#     a tool call's arguments by Hermes's own context compressor and
+#     missed by Hermes's own refusal guard (confirmed for real on this
+#     setup — see corruption-sweep.sh's own header). Any hit is
+#     quarantined into workspace/.corrupted/ and logged to
+#     workspace/.range-sweep-review-items.jsonl for the operator; see
+#     corruption-sweep.sh for exactly what this does and doesn't do (it
+#     is a passive safety net, not a live fix — the in-the-moment catch
+#     is the agent's own verify-then-run guard).
 #
 # Usage (run from the repo root):
 #   chmod +x scripts/range-sweep-watchdog.sh
@@ -93,12 +104,18 @@ set -u
 SCRIPT_DIR="${0:A:h}"
 RESTART_DELAY_SECONDS=5
 
+# Context-compression corruption sweep (see header note above and
+# corruption-sweep.sh's own header). Sourcing just defines
+# run_corruption_sweep() and the MARKER constant — no side effects here.
+source "$SCRIPT_DIR/corruption-sweep.sh"
+
 WORKSPACE_DIR="$SCRIPT_DIR/../workspace"
 WORKSPACE_STATE_FILE="$WORKSPACE_DIR/.range_traversal_state.json"
 TRAVERSAL_SCRIPT="$SCRIPT_DIR/../skills/security/range-assess/scripts/range_traversal.py"
 OUTPUT_LOG="$WORKSPACE_DIR/.range-sweep-watchdog-output.log"
 USAGE_FILE="$WORKSPACE_DIR/.range-sweep-last-usage.json"
 SESSION_ID_FILE="$WORKSPACE_DIR/.range-sweep-current-session-id"
+REVIEW_ITEMS_FILE="$WORKSPACE_DIR/.range-sweep-review-items.jsonl"
 
 SESSION_EXPORTS_DIR="$WORKSPACE_DIR/range-session-exports"
 SESSION_EXPORTS_INDEX="$SESSION_EXPORTS_DIR/index.txt"
@@ -252,6 +269,7 @@ cleanup() {
         kill "$hermes_pid" 2>/dev/null
         wait "$hermes_pid" 2>/dev/null
         archive_session_transcript "${session_id:-}" "interrupted attempt #${attempt:-?}"
+        run_corruption_sweep "$WORKSPACE_DIR" "$OUTPUT_LOG" "$REVIEW_ITEMS_FILE"
         echo "NOTE: if this attempt had cloned/started a working VM (<host>-ctf) that never" | tee -a "$OUTPUT_LOG"
         echo "finished its assessment, it is still running in Proxmox — range_traversal.py" | tee -a "$OUTPUT_LOG"
         echo "does not destroy it automatically on an interrupted attempt. Check" | tee -a "$OUTPUT_LOG"
@@ -424,6 +442,7 @@ while true; do
     } | tee -a "$OUTPUT_LOG"
 
     archive_session_transcript "${session_id:-}" "attempt #$attempt"
+    run_corruption_sweep "$WORKSPACE_DIR" "$OUTPUT_LOG" "$REVIEW_ITEMS_FILE"
 
     if [ -d "$LOG_DIR" ]; then
         echo "--- Last 5 agent.log lines: ---" | tee -a "$OUTPUT_LOG"
