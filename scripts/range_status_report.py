@@ -85,6 +85,57 @@ def fmt_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
+# range-sweep-watchdog.sh stamps each attempt with the shell's own locale
+# `date` output, e.g. (observed on this Mac, ja_JP locale):
+#   --- Attempt #1 (init): launching 'hermes -p qwen-experiment -z ...': 2026年 11月23日 月曜日 11時17分53秒 JST ---
+# Parsed as plain digit groups rather than strptime, since matching the
+# kanji weekday/era text with %A would require the parsing side to also
+# run under a ja_JP locale - digits alone are locale-independent. The
+# weekday text itself (月曜日 etc.) is skipped with .*? and never used.
+ATTEMPT_HEADER_RE = re.compile(
+    r"--- Attempt #(\d+) \((init|resume)\): launching .*?: "
+    r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日.*?"
+    r"(\d{1,2})時\s*(\d{1,2})分\s*(\d{1,2})秒"
+)
+
+
+def find_sweep_start(workspace: str):
+    """Return (started_at: datetime, mode: str, warning: str|None) for the
+    CURRENT sweep, anchored to the LAST '(init)' attempt in the watchdog's
+    own output log - a workspace that's been archived/cleared and
+    re-initialized has its clock reset there, same as the real sweep.
+    Falls back to the earliest attempt of any kind if no '(init)' line is
+    found (e.g. the log only covers a resumed run). Returns (None, None,
+    warning) if the log is missing or has no parseable attempt lines.
+    """
+    log_path = os.path.join(workspace, ".range-sweep-watchdog-output.log")
+    if not os.path.exists(log_path):
+        return None, None, f"{log_path} not found — cannot determine sweep start time"
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        return None, None, f"{log_path} exists but couldn't be read: {e}"
+
+    last_init = None
+    earliest_any = None
+    for m in ATTEMPT_HEADER_RE.finditer(text):
+        mode = m.group(2)
+        y, mo, d, h, mi, s = (int(g) for g in m.groups()[2:])
+        ts = datetime(y, mo, d, h, mi, s, tzinfo=JST)
+        if earliest_any is None or ts < earliest_any:
+            earliest_any = ts
+        if mode == "init":
+            if last_init is None or ts > last_init:
+                last_init = ts
+
+    if last_init is not None:
+        return last_init, "init", None
+    if earliest_any is not None:
+        return earliest_any, "resume (no init line found)", None
+    return None, None, f"no '--- Attempt #N (init|resume): ...' lines found in {log_path}"
+
+
 def build_report(workspace: str) -> dict:
     warnings = []
 
@@ -100,6 +151,20 @@ def build_report(workspace: str) -> dict:
     remediate_log, warn = load_json(os.path.join(workspace, ".range_remediate_log.json"), {})
     if warn:
         warnings.append(warn)
+
+    sweep_started_at, sweep_start_mode, warn = find_sweep_start(workspace)
+    if warn:
+        warnings.append(warn)
+    sweep_runtime = None
+    if sweep_started_at is not None:
+        now_jst = datetime.now(tz=JST)
+        elapsed = (now_jst - sweep_started_at).total_seconds()
+        sweep_runtime = {
+            "started_at": sweep_started_at.isoformat(),
+            "started_mode": sweep_start_mode,
+            "elapsed_seconds": elapsed,
+            "elapsed_human": fmt_duration(elapsed),
+        }
 
     # ---- hosts ----
     hosts = state.get("hosts", {})
@@ -168,6 +233,11 @@ def build_report(workspace: str) -> dict:
             "latest": datetime.fromtimestamp(latest, tz=JST).isoformat(),
             "span_seconds": latest - earliest,
             "span_human": fmt_duration(latest - earliest),
+            "note": (
+                "covers PoC/remediation attempts only - NOT the sweep's "
+                "total wall-clock runtime. No sweep-start timestamp is "
+                "recorded anywhere this script reads."
+            ),
         }
 
     # ---- data integrity: canonical result files actually on disk ----
@@ -210,6 +280,7 @@ def build_report(workspace: str) -> dict:
         "generated_at": datetime.now().astimezone().isoformat(),
         "workspace": workspace,
         "warnings": warnings,
+        "sweep_runtime": sweep_runtime,
         "hosts": {
             "total": len(hosts),
             "by_os": os_counts,
@@ -259,6 +330,14 @@ def print_human_report(report: dict):
         for w in report["warnings"]:
             print(f"  - {w}")
 
+    sr = report["sweep_runtime"]
+    print("\n-- Sweep runtime (JST) --")
+    if sr:
+        line("Started", f"{sr['started_at']}  ({sr['started_mode']})")
+        line("Elapsed", sr["elapsed_human"])
+    else:
+        line("Elapsed", "(unknown - see warnings above)")
+
     h = report["hosts"]
     print("\n-- Host coverage --")
     line("Total hosts", h["total"])
@@ -293,14 +372,22 @@ def print_human_report(report: dict):
     line("Dry-run only (last attempt)", r["dry_run_only"])
     line("needs_operator_decision", r["needs_operator_decision"])
 
-    print("\n-- Timing (JST) --")
+    # NOTE: this section only covers PoC/remediation ATTEMPTS, which start
+    # well after a finding is discovered (triage/clone/scan time isn't
+    # logged anywhere this script reads). It is NOT the sweep's total
+    # wall-clock runtime - a sweep that started hours before the first
+    # logged attempt will show a much shorter span here than it's
+    # actually been running. There is no "sweep start" timestamp recorded
+    # in .range_traversal_state.json to report a true total against.
+    print("\n-- PoC / Remediation Attempt Timing (JST) --")
+    print("   (attempts only - NOT total sweep runtime; see note above)")
     t = report["timing"]
     if t:
         line("Earliest logged attempt", t["earliest"])
         line("Latest logged attempt", t["latest"])
-        line("Span", t["span_human"])
+        line("Attempt-logging span", t["span_human"])
     else:
-        line("Span", "(no attempts logged yet)")
+        line("Attempt-logging span", "(no attempts logged yet)")
 
     d = report["data_integrity"]
     print("\n-- Data integrity --")

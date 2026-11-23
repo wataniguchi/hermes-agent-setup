@@ -289,7 +289,9 @@ waits (SSH/nmap/sqlmap round-trips), not generation — so while one
 subagent is blocked on its own tool call, a different subagent's
 reasoning turn can use the GPU instead of it sitting idle. That's an
 I/O-overlap gain, not a throughput multiplier, and it's the only gain
-delegation is actually expected to produce here.
+delegation is actually expected to produce here. **This reasoning is
+specific to PoC/remediate/audit actions and does NOT extend to
+cloning** — see the "Cloning" section below for why.
 
 **How to actually delegate** — claim several ready actions at once
 instead of calling `next` in a loop yourself:
@@ -370,7 +372,7 @@ successfully. It then had to clone a third time from scratch. One
 `--os`-level timeout mismatch, one wasted clone (and the minutes it
 takes), zero actual bugs in the clone logic itself.
 
-Two rules that prevent this entirely:
+Three rules that prevent this entirely:
 
 1. **Issue `/vm/clone` and `/vm/<vmid>/start` as a background command
    from the very first attempt** — never foreground-first-and-fall-
@@ -383,6 +385,86 @@ Two rules that prevent this entirely:
    failure comes back — "doesn't exist yet" and "already running"
    fail differently) — or just wait and re-check, rather than sending
    a second mutating call for the same vmid.
+3. **Never have more than one `/vm/clone` in flight across the whole
+   range at once.** Cloning is a heavy disk-copy operation on ONE
+   shared Proxmox host and storage backend — it does not get the
+   I/O-overlap benefit "Delegating to subagents" above describes for
+   PoC/remediate actions. That benefit exists specifically because a
+   PoC/remediate subagent's wall-clock time is dominated by waiting on
+   its OWN tool calls (SSH/nmap/sqlmap round-trips) while a different
+   subagent's reasoning turn uses the GPU instead — there is no
+   equivalent overlap for a clone, which is a single blocking
+   disk-copy with no reasoning in between to interleave with anything
+   else. Confirmed for real: a self-written batch script fired 15
+   `/vm/clone` requests at once for the range's remaining hosts,
+   reasoning (reasonably, if cloning were a cheap independent API
+   call, which it isn't) that parallel provisioning would save wall
+   time the same way delegated PoC/remediate work does. It didn't —
+   most of the 15 hung for the full request timeout and died, while an
+   EARLIER, separate batch of malformed clone requests had already left
+   16 dead, diskless vmid reservations sitting in Proxmox (a bridge-side
+   bug: the vmid gets reserved before the request body is validated, so
+   even a rejected/422 clone call can leave an empty stub VM behind —
+   check for a real disk, e.g. `qm config <vmid>` showing a
+   `scsi`/`virtio`/`sata` line, not just that the vmid exists). None of
+   this — successful clones included — ever got recorded as any host's
+   `working_vmid`, because it bypassed `record-scan` entirely. Clone
+   hosts strictly one at a time, in the same order `next` would hand
+   them to you, waiting for each one to fully complete and verifying it
+   actually produced a disk before starting the next. `next-batch` is
+   for claiming PoC/remediate/audit actions across already-provisioned
+   hosts — never use it, or any ad hoc script, to drive more than one
+   host's `clone_and_scan` concurrently.
+
+## Storage capacity: `hot-ssd` cannot physically hold every clone at once
+
+`hot-ssd` is an LVM thin pool on ONE external USB SSD (Buffalo, UAS,
+240GB nominal, ≈223.57GB as the actual thin pool) — not a large shared
+SAN, not elastic. Do the arithmetic before assuming clones can just
+accumulate: the 9 Windows-domain hosts alone
+(`BAF-DC1/DC2`, `DC1-beg`, `DC2-beg`, `ADCS-BAF/BEG`, `mail-int-baf`,
+`mail-beg`, `sp-int-baf`) are 60-100GB each — **620GB total if their
+working clones all existed at once, nearly 3x the entire pool.** This
+is not a margin-of-safety concern, it is a hard physical impossibility:
+the range's full footprint cannot coexist as working clones on this
+storage. Nothing in `range_traversal.py`'s state machine enforces this
+— `next`'s possible actions have no teardown step, so it is entirely on
+you to destroy each host's working clone once you're done with it,
+same as the single-host "Usage" example's step 7 already shows, but
+that discipline does NOT happen automatically in the traversal/
+`next-batch` flow and this skill has already observed it failing to
+happen in practice (a fully reverified, hours-old host's working clone
+left running/existing with nothing further to do on it).
+
+**Confirmed for real, same incident as the cloning-concurrency one
+above**: the pool hit 93.58% actual data usage, which is almost
+certainly why the 14:36 parallel clone burst's underlying `lvcreate`
+call stalled indefinitely (out of real blocks to allocate) rather than
+failing cleanly — and because that one stuck process held the volume
+group's own lock the whole time, it silently froze EVERY later LVM
+operation (every subsequent clone, every destroy, even the Proxmox web
+UI) for over 7 hours, with no error presented to the agent at all
+(requests just hung past the 2-hour HTTP timeout and came back `504`).
+A nearly-full thin pool is not merely "will fail with a clear error
+when full" — it can hang the whole storage layer first.
+
+Two rules:
+
+1. **Destroy (stop + delete) a host's working clone as soon as every
+   one of its findings reaches a terminal status** (closed, risk
+   accepted, or otherwise resolved via `resolve-review`) — do not leave
+   a finished host's clone sitting around while working through the
+   rest of the range. Check this explicitly; don't assume it already
+   happened.
+2. **Before issuing `/vm/clone`, check the pool actually has headroom**:
+   ```
+   lvs -o+data_percent,metadata_percent hot-ssd-vg/hot-ssd-pool
+   ```
+   If `Data%` is already high (treat anything above ~70-75% as a signal
+   to pause and destroy some finished hosts' clones first, not as "still
+   fine"), do not clone into it — the failure mode when this pool runs
+   genuinely out of space is not a clean error, it's the kind of
+   multi-hour silent hang described above.
 
 ## Checking whether a working clone still exists, and recovering if it doesn't
 

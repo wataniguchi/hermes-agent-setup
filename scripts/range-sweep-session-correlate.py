@@ -36,10 +36,17 @@ entry). For each call this script reports:
 Usage:
     range-sweep-session-correlate.py <session_export.md>
     range-sweep-session-correlate.py --workspace <dir> --hermes-home <dir> --profile <name>
-        (looks up the current session id from
-         <workspace>/.range-sweep-current-session-id, then finds the most
-         recently modified file matching
-         <hermes-home>/profiles/<profile>/session-exports/<id>-*.md)
+        (scans EVERY session-export file under
+         <hermes-home>/profiles/<profile>/session-exports/, not just the
+         watchdog's current one - a long-running sweep spans many restarts,
+         each getting its own export file, and
+         <workspace>/.range-sweep-current-session-id only ever points at the
+         latest one. Files are processed in chronological order (by their
+         own filename timestamp prefix) and --start/--end filter across all
+         of them, so a window like "--start 2026-11-23T11:17:57" spanning
+         several restarts now sees everything, not just the newest session.
+         Pass an explicit <session_export.md> instead to inspect one file
+         only.)
 
 --start/--end (JST, inclusive) accept three forms, and can mix forms
 (e.g. --start with a bare time, --end with a full date+time):
@@ -142,23 +149,63 @@ def in_range(ts_jst, start, end):
     return True
 
 
-def resolve_export_path(args):
+FILENAME_TS_RE = re.compile(r"^(\d{8}_\d{6})")
+# The timestamp + session-id prefix, WITHOUT the trailing "-<slug>.md".
+# Hermes can re-save the export for the SAME session under a new
+# auto-generated slug as a long session continues - those files share
+# this prefix and must be de-duplicated (keep the freshest only), not
+# treated as separate sessions.
+SESSION_KEY_RE = re.compile(r"^(\d{8}_\d{6}_[0-9a-zA-Z]+)")
+
+
+def _filename_sort_key(path):
+    m = FILENAME_TS_RE.match(os.path.basename(path))
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+    # Fall back to mtime for any file that doesn't follow the usual
+    # <timestamp>_<id>-<slug>.md naming (shouldn't normally happen).
+    return datetime.fromtimestamp(os.path.getmtime(path))
+
+
+def _session_key(path):
+    m = SESSION_KEY_RE.match(os.path.basename(path))
+    return m.group(1) if m else os.path.basename(path)
+
+
+def resolve_export_paths(args):
+    """Return every DISTINCT session's export file to scan, oldest first.
+
+    A single explicit export_file argument means "just this one file".
+    Otherwise, scan every export file for the profile - not just the
+    watchdog's current session - since a long sweep spans many restarts,
+    each with its own export file, and nothing else tracks that history.
+
+    Several files can share the same session id (same timestamp+id
+    prefix, different auto-generated slug) when hermes re-saves the same
+    still-running session's export under a new title. Those are NOT
+    separate sessions - keep only the most recently modified file per
+    session key (the fullest snapshot), or the same calls get printed
+    once per stale snapshot found.
+    """
     if args.export_file:
-        return args.export_file
-    sid_path = os.path.join(args.workspace, ".range-sweep-current-session-id")
-    with open(sid_path, encoding="utf-8") as f:
-        session_id = f.read().strip()
+        return [args.export_file]
     pattern = os.path.join(
-        args.hermes_home, "profiles", args.profile, "session-exports",
-        f"{session_id}-*.md",
+        args.hermes_home, "profiles", args.profile, "session-exports", "*.md",
     )
     matches = glob.glob(pattern)
     if not matches:
-        raise FileNotFoundError(f"no session-export file matching {pattern}")
-    # Prefer the most recently modified match - the one still being
-    # actively appended to, when more than one file shares this session id.
-    matches.sort(key=os.path.getmtime, reverse=True)
-    return matches[0]
+        raise FileNotFoundError(f"no session-export files matching {pattern}")
+    best_by_key = {}
+    for m in matches:
+        key = _session_key(m)
+        if key not in best_by_key or os.path.getmtime(m) > os.path.getmtime(best_by_key[key]):
+            best_by_key[key] = m
+    deduped = list(best_by_key.values())
+    deduped.sort(key=_filename_sort_key)
+    return deduped
 
 
 def extract_preview(args_raw, limit=90):
@@ -217,38 +264,17 @@ def parse_calls(assistant_body):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("export_file", nargs="?", default=None)
-    ap.add_argument("--workspace")
-    ap.add_argument("--hermes-home", default=os.path.expanduser("~/.hermes"))
-    ap.add_argument("--profile", default="qwen-experiment")
-    ap.add_argument("--only-compression", action="store_true",
-                     help="print only calls with a compression marker and/or refusal")
-    ap.add_argument("--start", default=None,
-                     help="JST lower bound, inclusive: HH:MM[:SS] (date defaults to the "
-                          "export's own earliest day), YYYY-MM-DD, or YYYY-MM-DD[T ]HH:MM[:SS]")
-    ap.add_argument("--end", default=None,
-                     help="JST upper bound, inclusive: HH:MM[:SS] (date defaults to the "
-                          "export's own latest day), YYYY-MM-DD, or YYYY-MM-DD[T ]HH:MM[:SS]")
-    args = ap.parse_args()
-
-    try:
-        path = resolve_export_path(args)
-    except Exception as e:
-        print(f"error resolving export file: {e}", file=sys.stderr)
-        return 1
-
+def read_sections(path):
+    """Parse one export file into (kind, ts, name, body) section tuples.
+    Returns None (after printing a warning) if the file can't be read or
+    has no recognizable Assistant/Tool sections.
+    """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
     except OSError as e:
-        print(f"error reading {path}: {e}", file=sys.stderr)
-        return 1
-
-    print(f"# source: {path}", file=sys.stderr)
+        print(f"# warning: could not read {path}: {e}", file=sys.stderr)
+        return None
 
     matches = list(HEADER_RE.finditer(text))
     sections = []
@@ -267,29 +293,16 @@ def main():
             sections.append(("assistant", ts, None, body))
 
     if not sections:
-        print("no Assistant/Tool sections found in export", file=sys.stderr)
-        return 1
+        print(f"# warning: no Assistant/Tool sections found in {path}", file=sys.stderr)
+        return None
+    return sections
 
-    all_ts_jst = [s[1].astimezone(JST) for s in sections]
-    earliest_jst, latest_jst = min(all_ts_jst), max(all_ts_jst)
 
-    try:
-        start = (
-            parse_bound(args.start, default_date=earliest_jst)
-            if args.start else None
-        )
-        end = (
-            parse_bound(args.end, default_date=latest_jst, end_of_day_if_date_only=True)
-            if args.end else None
-        )
-    except argparse.ArgumentTypeError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if start is not None:
-        print(f"# --start resolved to {start.isoformat()}", file=sys.stderr)
-    if end is not None:
-        print(f"# --end resolved to {end.isoformat()}", file=sys.stderr)
-
+def process_sections(sections, start, end, args):
+    """Print correlated call lines for one file's sections, honoring the
+    already-resolved global start/end bounds. model_latency resets at the
+    start of each file, since it's a fresh hermes process each time.
+    """
     last_tool_ts = None
     i = 0
     while i < len(sections):
@@ -343,6 +356,83 @@ def main():
         else:
             last_tool_ts = ts
         i = j
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("export_file", nargs="?", default=None)
+    ap.add_argument("--workspace")
+    ap.add_argument("--hermes-home", default=os.path.expanduser("~/.hermes"))
+    ap.add_argument("--profile", default="qwen-experiment")
+    ap.add_argument("--only-compression", action="store_true",
+                     help="print only calls with a compression marker and/or refusal")
+    ap.add_argument("--start", default=None,
+                     help="JST lower bound, inclusive: HH:MM[:SS] (date defaults to the "
+                          "earliest day across ALL scanned exports), YYYY-MM-DD, or "
+                          "YYYY-MM-DD[T ]HH:MM[:SS]")
+    ap.add_argument("--end", default=None,
+                     help="JST upper bound, inclusive: HH:MM[:SS] (date defaults to the "
+                          "latest day across ALL scanned exports), YYYY-MM-DD, or "
+                          "YYYY-MM-DD[T ]HH:MM[:SS]")
+    args = ap.parse_args()
+
+    try:
+        paths = resolve_export_paths(args)
+    except Exception as e:
+        print(f"error resolving export file(s): {e}", file=sys.stderr)
+        return 1
+
+    per_file_sections = {}
+    all_ts_jst = []
+    for path in paths:
+        sections = read_sections(path)
+        if sections is None:
+            continue
+        per_file_sections[path] = sections
+        all_ts_jst.extend(s[1].astimezone(JST) for s in sections)
+
+    if not per_file_sections:
+        print("no usable session-export files found", file=sys.stderr)
+        return 1
+
+    earliest_jst, latest_jst = min(all_ts_jst), max(all_ts_jst)
+
+    try:
+        start = (
+            parse_bound(args.start, default_date=earliest_jst)
+            if args.start else None
+        )
+        end = (
+            parse_bound(args.end, default_date=latest_jst, end_of_day_if_date_only=True)
+            if args.end else None
+        )
+    except argparse.ArgumentTypeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if start is not None:
+        print(f"# --start resolved to {start.isoformat()}", file=sys.stderr)
+    if end is not None:
+        print(f"# --end resolved to {end.isoformat()}", file=sys.stderr)
+
+    # paths is already oldest-first (resolve_export_paths sorts by the
+    # export filename's own timestamp prefix); process in that order so
+    # output stays chronological across a multi-restart sweep.
+    for path in paths:
+        sections = per_file_sections.get(path)
+        if sections is None:
+            continue
+        # Skip files entirely outside the requested window - cheap check
+        # using this file's own min/max, before printing its source line.
+        file_ts_jst = [s[1].astimezone(JST) for s in sections]
+        file_min, file_max = min(file_ts_jst), max(file_ts_jst)
+        if end is not None and file_min > end:
+            continue
+        if start is not None and file_max < start:
+            continue
+        print(f"# source: {path}", file=sys.stderr)
+        process_sections(sections, start, end, args)
 
     return 0
 
