@@ -47,10 +47,31 @@
 #     corruption-sweep.sh for exactly what this does and doesn't do (it
 #     is a passive safety net, not a live fix — the in-the-moment catch
 #     is the agent's own verify-then-run guard).
+#   - Pre-clone companion: scripts/range-preclone.py, started once in the
+#     background like the monitor (disable with --no-preclone). While the
+#     agent works on one host, it clones the NEXT not_started host's
+#     working clone (golden + 500) through the bridge and leaves it
+#     stopped, so the 2-35 minute copy off the SMR disk is out of the
+#     critical path; the agent finds it ready and starts it (SKILL.md's
+#     Cloning rule 5). Read-only on state, never more than one waiting
+#     clone, capacity-checked, and the bridge's one-clone-at-a-time guard
+#     keeps it from ever cloning alongside the agent. Confirmed on
+#     2026-11-24: pre-cloned mail-beg (34.8 min) and sp-int-baf (22.6 min)
+#     entirely while the agent worked other hosts. It exits on its own
+#     once no not_started hosts remain; cleanup() stops it otherwise. Its
+#     output goes to workspace/.range-preclone.log.
+#   - Teardown on graceful completion: when is-done confirms the sweep is
+#     finished, scripts/range-teardown.py destroys (through the bridge) the
+#     working clones of hosts whose findings are ALL finished, and lists
+#     any it kept (e.g. a host with a finding awaiting your decision).
+#     Never on Ctrl-C/kill — an interrupted sweep keeps its clones for the
+#     resumed run. Disable with --no-teardown. Confirmed necessary on
+#     2026-11-24: with clones pre-cloned for it, the agent left four
+#     finished hosts' clones running after the sweep completed.
 #
 # Usage (run from the repo root):
 #   chmod +x scripts/range-sweep-watchdog.sh
-#   ./scripts/range-sweep-watchdog.sh [-p|--profile <name>] [--init|--resume] [--config <path>]
+#   ./scripts/range-sweep-watchdog.sh [-p|--profile <name>] [--init|--resume] [--config <path>] [--no-monitor] [--no-preclone] [--no-teardown]
 #
 # Examples:
 #   ./scripts/range-sweep-watchdog.sh                          # profile: qwen-experiment, auto-detect init/resume
@@ -116,6 +137,7 @@ OUTPUT_LOG="$WORKSPACE_DIR/.range-sweep-watchdog-output.log"
 USAGE_FILE="$WORKSPACE_DIR/.range-sweep-last-usage.json"
 SESSION_ID_FILE="$WORKSPACE_DIR/.range-sweep-current-session-id"
 REVIEW_ITEMS_FILE="$WORKSPACE_DIR/.range-sweep-review-items.jsonl"
+PRECLONE_LOG="$WORKSPACE_DIR/.range-preclone.log"
 
 SESSION_EXPORTS_DIR="$WORKSPACE_DIR/range-session-exports"
 SESSION_EXPORTS_INDEX="$SESSION_EXPORTS_DIR/index.txt"
@@ -124,10 +146,12 @@ PROFILE="qwen-experiment"
 MODE=""   # "" = auto-detect on attempt #1; "init" or "resume" = forced every attempt
 HOSTS_CONFIG="/root/.hermes/skills/security/range-assess/config/hosts.json"
 START_MONITOR=1
+START_PRECLONE=1
+TEARDOWN_ON_COMPLETE=1
 
 usage() {
     cat <<EOF
-Usage: $0 [-p|--profile <name>] [--init|--resume] [--config <path>] [--no-monitor]
+Usage: $0 [-p|--profile <name>] [--init|--resume] [--config <path>] [--no-monitor] [--no-preclone] [--no-teardown]
 
   -p, --profile <name>   The Hermes profile to run under. Passed as
                           "hermes -p <name> -z <prompt>". Default:
@@ -168,6 +192,20 @@ Usage: $0 [-p|--profile <name>] [--init|--resume] [--config <path>] [--no-monito
                           terminal, or don't want the periodic
                           session-export activity at all.
 
+  --no-preclone           Don't start scripts/range-preclone.py as a
+                          background companion. Without it the agent
+                          clones each host itself when it gets there
+                          (the original behavior). Its output, when
+                          running, goes to $PRECLONE_LOG
+
+  --no-teardown           Don't run scripts/range-teardown.py when the
+                          sweep completes. By default, on a GRACEFUL
+                          completion only (is-done confirms it), it
+                          destroys the working clones of hosts whose
+                          findings are all finished, and lists any it
+                          kept. Never runs on Ctrl-C/kill: an interrupted
+                          sweep keeps its clones for the resumed run.
+
   With neither --init nor --resume given: attempt #1 auto-detects by
   checking whether
   $WORKSPACE_STATE_FILE
@@ -194,6 +232,8 @@ while [[ $# -gt 0 ]]; do
         --init) MODE="init"; shift ;;
         --resume) MODE="resume"; shift ;;
         --no-monitor) START_MONITOR=0; shift ;;
+        --no-preclone) START_PRECLONE=0; shift ;;
+        --no-teardown) TEARDOWN_ON_COMPLETE=0; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -229,6 +269,24 @@ if [[ "$START_MONITOR" -eq 1 ]]; then
     fi
 else
     echo "Monitor: disabled (--no-monitor)"
+fi
+
+PRECLONE_PID=""
+if [[ "$START_PRECLONE" -eq 1 ]]; then
+    PRECLONE_SCRIPT="$SCRIPT_DIR/range-preclone.py"
+    if [[ -f "$PRECLONE_SCRIPT" ]]; then
+        # Started once, not per attempt — it re-reads state every round, so
+        # it follows the sweep across relaunches the same way the monitor
+        # does. Waits harmlessly if the state file doesn't exist yet (a
+        # genuine first --init attempt).
+        python3 "$PRECLONE_SCRIPT" --workspace "$WORKSPACE_DIR" >> "$PRECLONE_LOG" 2>&1 &
+        PRECLONE_PID=$!
+        echo "Pre-clone: started in background (pid $PRECLONE_PID) — output in $PRECLONE_LOG"
+    else
+        echo "Pre-clone: $PRECLONE_SCRIPT not found — skipping (run with --no-preclone to silence this)"
+    fi
+else
+    echo "Pre-clone: disabled (--no-preclone)"
 fi
 
 # Unconditional on exit path, same rationale as ctf-sweep-watchdog.sh's
@@ -289,6 +347,15 @@ cleanup() {
     if [[ -n "${MONITOR_PID:-}" ]]; then
         echo "Stopping monitor (pid $MONITOR_PID)..."
         kill "$MONITOR_PID" 2>/dev/null
+    fi
+    # It may already have exited on its own (no not_started hosts left).
+    # SIGTERM, not SIGINT: a background job started by a non-interactive
+    # shell ignores SIGINT. The script handles SIGTERM and logs that it
+    # stopped; a clone it had already sent to the bridge still finishes
+    # there and simply waits, stopped, like any other pre-clone.
+    if [[ -n "${PRECLONE_PID:-}" ]] && kill -0 "$PRECLONE_PID" 2>/dev/null; then
+        echo "Stopping pre-clone helper (pid $PRECLONE_PID)..."
+        kill -TERM "$PRECLONE_PID" 2>/dev/null
     fi
 }
 trap cleanup EXIT
@@ -435,6 +502,11 @@ while true; do
 
     wait "$hermes_pid"
     exit_code=$?
+    # The attempt is over. Clearing this keeps cleanup() — which also runs
+    # on a normal exit, via the EXIT trap — from treating an already-
+    # finished attempt as an interrupted one (re-archiving it and printing
+    # the "a working VM may still be running" notes after a graceful end).
+    hermes_pid=""
 
     {
         echo
@@ -459,6 +531,19 @@ while true; do
             echo "To run this range again, start a fresh, differently-scoped sweep deliberately"
             echo "(archive/clear the workspace first) rather than relying on a restart here."
         } | tee -a "$OUTPUT_LOG"
+        # Only here, on a confirmed graceful completion — never in cleanup():
+        # an interrupted sweep keeps its clones for the resumed run. See
+        # range-teardown.py's header for what it destroys and what it keeps.
+        if [[ "$TEARDOWN_ON_COMPLETE" -eq 1 ]]; then
+            if [[ -f "$SCRIPT_DIR/range-teardown.py" ]]; then
+                echo "--- Tearing down working clones of fully finished hosts ---" | tee -a "$OUTPUT_LOG"
+                python3 "$SCRIPT_DIR/range-teardown.py" --workspace "$WORKSPACE_DIR" 2>&1 | tee -a "$OUTPUT_LOG"
+            else
+                echo "Teardown: $SCRIPT_DIR/range-teardown.py not found — working clones left as they are." | tee -a "$OUTPUT_LOG"
+            fi
+        else
+            echo "Teardown: disabled (--no-teardown) — working clones left as they are." | tee -a "$OUTPUT_LOG"
+        fi
         break
     fi
 

@@ -255,6 +255,7 @@ class CloneRequest(BaseModel):
 # case and for clones started outside this bridge.
 _clone_guard_lock = threading.Lock()
 _clones_in_progress: set[int] = set()
+MAX_CONCURRENT_CLONES = max(1, int(os.environ.get("BRIDGE_MAX_CONCURRENT_CLONES", "1")))
 
 _MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 
@@ -323,17 +324,50 @@ def _restore_template_net0(vmid: int, template_net0: str) -> None:
                 f"{put_err.detail if put_err else '(none — PUT accepted but not applied)'}"
             ),
         )
-    if was_running:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"vmid {vmid} was STARTED before /vm/clone finished, so it booted "
-                "with the wrong MAC and would not have been reachable at its range "
-                "address. The bridge has stopped it and applied the golden image's "
-                f"net0 (MAC {want_mac}). The clone itself is fine and is now STOPPED — "
-                f"call POST /vm/{vmid}/start once, and only now."
-            ),
-        )
+    return was_running
+
+
+def _early_start_error(vmid: int, mac: str | None) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"vmid {vmid} was STARTED before /vm/clone finished, so it booted "
+            "with the wrong MAC and would not have been reachable at its range "
+            "address. The bridge has stopped it and applied the golden image's "
+            f"net0 (MAC {mac}). The clone itself is fine and is now STOPPED — "
+            f"call POST /vm/{vmid}/start once, and only now. (No 'pristine' "
+            "snapshot was taken: the disk is no longer identical to the golden "
+            "image after that early boot.)"
+        ),
+    )
+
+
+# ---------- Snapshots ----------
+#
+# Every successful /vm/clone ends with a disk-only snapshot named
+# PRISTINE_SNAPSHOT, taken while the clone is still stopped and has never
+# booted — i.e. byte-for-byte the golden image, with the golden MAC
+# already applied. On LVM-thin it costs ~nothing until the VM diverges, and
+# it turns "get back to a clean copy of this host" from a full re-clone
+# (2-3 min Linux, 16-33 min Windows off the SMR source) into a rollback of
+# seconds. Rolling back to it also discards every remediation already
+# applied on that clone — it's a full reset of the host, not an undo of one
+# change.
+#
+# Before this, the bridge had a rollback endpoint but no way to TAKE a
+# snapshot, and its default target (`clean-tooled`) only exists on the
+# windows-binary-analysis template; a full clone doesn't carry the
+# source's snapshots, so range working clones had nothing to roll back to.
+PRISTINE_SNAPSHOT = "pristine"
+_SNAPNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,39}$")
+
+
+def _take_snapshot(vmid: int, name: str, description: str) -> None:
+    upid = pve_request(
+        "POST", f"/qemu/{vmid}/snapshot",
+        data={"snapname": name, "description": description, "vmstate": 0},
+    )
+    wait_for_task(upid)
 
 
 # ---------- Storage capacity ----------
@@ -479,6 +513,25 @@ def clone_vm(req: CloneRequest):
                 status_code=409,
                 detail=f"a clone onto vmid {req.new_vmid} is already in progress on this bridge.",
             )
+        # Range-wide limit, not just per-vmid: the clone source is a single
+        # 5400 RPM SMR disk (vmdata) and the target a single USB SSD, so two
+        # clones at once only slow each other down — and a parallel burst is
+        # what stalled the whole LVM layer for 7+ hours on 2026-11-23.
+        # range-assess's SKILL.md already says "never more than one clone in
+        # flight"; this enforces it for every client of this bridge (the
+        # agent, a pre-clone helper, the windows-binary-analysis skill)
+        # instead of relying on each to remember. Set
+        # BRIDGE_MAX_CONCURRENT_CLONES higher only if the storage changes.
+        if len(_clones_in_progress) >= MAX_CONCURRENT_CLONES:
+            busy = ", ".join(str(v) for v in sorted(_clones_in_progress))
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"another clone is already in progress on this bridge (vmid {busy}); "
+                    f"at most {MAX_CONCURRENT_CLONES} at a time. Nothing was created for "
+                    f"vmid {req.new_vmid}. Wait for that clone to finish, then retry."
+                ),
+            )
         _clones_in_progress.add(req.new_vmid)
     try:
         template_config = pve_request("GET", f"/qemu/{req.template_vmid}/config")
@@ -503,10 +556,31 @@ def clone_vm(req: CloneRequest):
         )
         wait_for_task(upid)
 
-        if template_net0:
-            _restore_template_net0(req.new_vmid, template_net0)
+        was_running = _restore_template_net0(req.new_vmid, template_net0) if template_net0 else False
+        if was_running:
+            raise _early_start_error(req.new_vmid, _mac_of(template_net0))
 
-        return {"vmid": req.new_vmid, "status": "cloned", "mac": _mac_of(template_net0)}
+        # Insurance, not a precondition: if the snapshot fails, the clone is
+        # still perfectly usable, so report it instead of failing the call.
+        try:
+            _take_snapshot(
+                req.new_vmid, PRISTINE_SNAPSHOT,
+                f"Untouched clone of golden {req.template_vmid} (golden MAC applied, never booted).",
+            )
+            pristine = True
+            pristine_note = None
+        except HTTPException as exc:
+            pristine = False
+            pristine_note = f"pristine snapshot failed (clone is still usable): {exc.detail}"
+            print(f"{_log_timestamp()} /vm/clone {req.new_vmid}: {pristine_note}", flush=True)
+
+        result = {
+            "vmid": req.new_vmid, "status": "cloned", "mac": _mac_of(template_net0),
+            "pristine_snapshot": PRISTINE_SNAPSHOT if pristine else None,
+        }
+        if pristine_note:
+            result["note"] = pristine_note
+        return result
     finally:
         with _clone_guard_lock:
             _clones_in_progress.discard(req.new_vmid)
@@ -575,6 +649,8 @@ _CLONE_WAIT_HINT = {
                "built (and very possibly about to succeed). Wait for /vm/clone to "
                "return; only destroy it if that call comes back non-200.",
     "rollback": "Wait for /vm/clone to return 200 first.",
+    "snapshot": "Wait for /vm/clone to return 200 first — it takes the 'pristine' "
+                "snapshot itself at the end.",
 }
 
 
@@ -630,13 +706,76 @@ def stop_vm(vmid: int):
     return {"vmid": vmid, "status": "stopped"}
 
 
+def _list_snapshots(vmid: int) -> list[dict]:
+    snaps = pve_request("GET", f"/qemu/{vmid}/snapshot") or []
+    # Proxmox always includes a pseudo-entry "current" (the live state).
+    return [
+        {"name": s.get("name"), "description": s.get("description", ""),
+         "snaptime": s.get("snaptime"), "parent": s.get("parent"),
+         "vmstate": bool(s.get("vmstate"))}
+        for s in snaps if s.get("name") != "current"
+    ]
+
+
+@app.get("/vm/{vmid}/snapshots")
+def list_snapshots(vmid: int):
+    # Read-only, so not behind guard_not_template (same reasoning as status).
+    return {"vmid": vmid, "snapshots": _list_snapshots(vmid)}
+
+
+class SnapshotRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+@app.post("/vm/{vmid}/snapshot")
+def create_snapshot(vmid: int, req: SnapshotRequest):
+    guard_not_template(vmid)
+    refuse_if_being_cloned(vmid, "snapshot")
+    if not _SNAPNAME_RE.match(req.name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid snapshot name {req.name!r}: must start with a letter, then "
+                   "letters/digits/'_'/'-', 2-40 characters (Proxmox's own rule).",
+        )
+    # Disk-only (no RAM state): works whether the VM is running or stopped,
+    # is small, and is what rollback below expects.
+    _take_snapshot(vmid, req.name, req.description)
+    return {"vmid": vmid, "snapshot": req.name, "status": "created"}
+
+
 @app.post("/vm/{vmid}/rollback")
-def rollback_vm(vmid: int, snapname: str = "clean-tooled"):
+def rollback_vm(vmid: int, snapname: str = "clean-tooled", start: bool = False):
+    # Default stays `clean-tooled` for the windows-binary-analysis skill's
+    # existing calls. Range working clones use `pristine` (taken by
+    # /vm/clone) or a snapshot made with POST /vm/{vmid}/snapshot.
     guard_not_template(vmid)
     refuse_if_being_cloned(vmid, "rollback")
+    if not _SNAPNAME_RE.match(snapname):
+        raise HTTPException(status_code=400, detail=f"invalid snapshot name {snapname!r}")
+    names = [s["name"] for s in _list_snapshots(vmid)]
+    if snapname not in names:
+        raise HTTPException(
+            status_code=404,
+            detail=f"vmid {vmid} has no snapshot named {snapname!r}. Available: {names or 'none'}.",
+        )
+    # Rolling a disk-only snapshot back means the running guest's disk is
+    # replaced underneath it — stop it cleanly first rather than leave that
+    # to Proxmox, so the outcome is the same every time: a stopped VM.
+    status = pve_request("GET", f"/qemu/{vmid}/status/current")
+    if status.get("status") == "running":
+        stop_upid = pve_request("POST", f"/qemu/{vmid}/status/stop")
+        wait_for_task(stop_upid)
     upid = pve_request("POST", f"/qemu/{vmid}/snapshot/{snapname}/rollback")
     wait_for_task(upid)
-    return {"vmid": vmid, "status": f"rolled back to {snapname}"}
+    if start:
+        start_upid = pve_request("POST", f"/qemu/{vmid}/status/start")
+        wait_for_task(start_upid)
+    return {
+        "vmid": vmid, "status": f"rolled back to {snapname}",
+        "running": start,
+        "note": None if start else f"VM is STOPPED — call POST /vm/{vmid}/start when ready.",
+    }
 
 
 @app.delete("/vm/{vmid}")

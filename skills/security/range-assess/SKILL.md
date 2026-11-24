@@ -373,7 +373,7 @@ successfully. It then had to clone a third time from scratch. One
 `--os`-level timeout mismatch, one wasted clone (and the minutes it
 takes), zero actual bugs in the clone logic itself.
 
-Four rules that prevent this entirely:
+Five rules that prevent this entirely:
 
 1. **Issue `/vm/clone` and `/vm/<vmid>/start` as background commands
    from the very first attempt** — never foreground-first-and-fall-
@@ -420,7 +420,11 @@ Four rules that prevent this entirely:
    actually produced a disk before starting the next. `next-batch` is
    for claiming PoC/remediate/audit actions across already-provisioned
    hosts — never use it, or any ad hoc script, to drive more than one
-   host's `clone_and_scan` concurrently.
+   host's `clone_and_scan` concurrently. The bridge now enforces this
+   itself: a second `/vm/clone` while one is running gets `409 "another
+   clone is already in progress"` and creates nothing — that means
+   "wait and retry later", not an error to work around. (The other clone
+   may be the operator's pre-clone helper — see rule 5.)
 4. **Start a working clone only after `/vm/clone` has returned `200` —
    and never scan one whose clone call didn't.** A clone is not finished
    when Proxmox's copy finishes: the bridge then sets the clone's `net0`
@@ -459,6 +463,28 @@ Four rules that prevent this entirely:
      clone (status, MAC) instead of recording — `record-scan` on an
      unreachable target writes `scan_failed`, and that can't be undone
      without an operator.
+5. **Your host's working clone may already exist — check before cloning.**
+   A host's working clone always uses vmid **golden + 500** (9110 → 9610,
+   9207 → 9707) and the name `<host>-ctf`. The operator may run a
+   pre-clone helper (`scripts/range-preclone.py`, on the Mac) that clones
+   the NEXT `not_started` host ahead of time while you work on the
+   current one; you may also have cloned it yourself earlier and not yet
+   recorded it. So when `next` hands you `clone_and_scan`, first call
+   `GET /vm/<golden+500>/status`:
+   - `exists: false` → clone it yourself (capacity check first, see
+     "Storage capacity" below).
+   - `ready_to_start: true` → it's a finished clone with the golden MAC
+     and a `pristine` snapshot. **Start it — do not clone again and do
+     not destroy it** as a "stale leftover". Then continue exactly as
+     after your own clone (reachability check, `record-scan`, ...).
+     Confirmed working for real: 9707 was found this way and started,
+     saving a 33-minute Windows clone.
+   - `clone_in_progress: true` or a `lock` → someone else's clone of it is
+     still running. Don't start, clone, or delete it: poll the status
+     every minute or two until `ready_to_start` is true, then start it.
+     (The bridge would refuse all three with `409` anyway.)
+   A clone that's waiting for you costs `hot-ssd` space, so don't leave it
+   unused: start it when its host comes up.
 
 ## Storage capacity: `hot-ssd` cannot physically hold every clone at once
 
@@ -499,16 +525,39 @@ Two rules:
    accepted, or otherwise resolved via `resolve-review`) — do not leave
    a finished host's clone sitting around while working through the
    rest of the range. Check this explicitly; don't assume it already
-   happened.
+   happened. **Teardown belongs to FINISHING a host, not to starting the
+   next one.** Confirmed for real (2026-11-24): teardowns had only ever
+   happened right before cloning the next host, so once clones were
+   pre-cloned for the agent (Cloning rule 5) that moment never came, and
+   four finished hosts' clones (9612, 9707, 9708, 9709) were still
+   running when the sweep completed. So: the moment a host's last
+   finding reaches a final status, stop + `DELETE` its clone — and
+   **before you report the sweep as done**, go through every host's
+   `working_vmid` in `status`, check each with `GET /vm/<vmid>/status`,
+   and destroy any clone still existing whose host is completely
+   finished. **For teardown, a host whose only unfinished findings are
+   ones `next` reports as `review_needed` (awaiting the operator) counts
+   as finished** — destroy its clone and list those findings in your
+   summary. Its evidence is already in state, and the operator can
+   re-clone the host if they want to look; keeping such clones around
+   during the sweep would let them pile up on `hot-ssd` (the same
+   operator-decision finding has appeared on many hosts at once). The
+   watchdog also runs
+   `scripts/range-teardown.py` with the same rules when a sweep
+   completes, as a safety net — not as a replacement for doing it
+   yourself.
 2. **Before issuing `/vm/clone`, check the pool actually has headroom**
    through the bridge (you have no shell on the Proxmox host, so `lvs`
    is not available to you):
    ```
    curl -s "http://host.docker.internal:8811/storage/hot-ssd/status?template_vmid=<golden_vmid>"
    ```
-   It returns the pool's `used_percent` (the thin pool's Data%), the
-   template's worst-case clone size (`template_disk_gib`), the
-   `projected_percent` after cloning it, and `ok_to_clone`. If
+   Always include `?template_vmid=` — without it the check can't see how
+   big this particular clone is (a Windows golden image is up to 100 GiB,
+   nearly half the pool). It returns the pool's `used_percent` (the thin
+   pool's Data%), the template's worst-case clone size
+   (`template_disk_gib`), the `projected_percent` after cloning it, and
+   `ok_to_clone`. If
    `ok_to_clone` is false, do not clone: destroy finished hosts' working
    clones first (rule 1), then check again. The bridge enforces the same
    limits itself — `/vm/clone` returns `507` with the same `reason` when
@@ -576,6 +625,50 @@ was written from the error text Proxmox returned in a *different* call
 against this exact endpoint called on a genuinely nonexistent vmid.
 Verify the real error text/status code once against a real target
 before trusting the `exists: false` branch.
+
+## Snapshots: every clone has a `pristine` restore point
+
+Every clone made through the bridge's `/vm/clone` ends with a disk-only
+snapshot named `pristine`, taken while the clone was stopped and had
+never booted, with the golden MAC already applied — i.e. identical to the
+golden image. `GET /vm/<vmid>/snapshots` lists a clone's snapshots. (A
+clone that was started before `/vm/clone` returned has no `pristine`:
+its disk had already changed.)
+
+**Use it instead of destroy + re-clone when a working clone is broken** —
+a PoC or remediation crashed something, SSH stopped answering, the guest
+won't boot, or its state is otherwise unknown:
+
+```
+curl -X POST "http://host.docker.internal:8811/vm/<vmid>/rollback?snapname=pristine&start=true"
+```
+
+That takes seconds instead of a full re-clone (minutes for Linux, up to
+33 minutes for Windows). Without `start=true` the VM is left STOPPED.
+Either way, re-run the reachability check before going on. The working
+vmid doesn't change, so no `reset-host` is needed.
+
+**A rollback to `pristine` resets the WHOLE host** — every remediation
+already applied on that clone is gone along with whatever broke. So:
+- Before any remediation has been applied on that host: roll back freely.
+- If any of that host's findings is already `remediation_applied` or
+  `reverified_closed`: **don't roll back — stop and report the broken
+  clone instead.** Those fixes would silently disappear, and a reverify
+  against the reset clone would wrongly come back `reachable: true`.
+  That's an operator decision, not yours.
+
+Optionally, before a remediation you expect could break the host, take
+your own snapshot and roll back to that instead (same rules, but it only
+discards what happened after it):
+
+```
+curl -X POST http://host.docker.internal:8811/vm/<vmid>/snapshot \
+  -H "Content-Type: application/json" \
+  -d '{"name": "pre-remediate-<short-finding-id>", "description": "<what is about to change>"}'
+```
+
+Snapshots take `hot-ssd` space as the VM diverges from them; they are
+removed along with the VM when you destroy it.
 
 ## What's genuinely untested here
 
