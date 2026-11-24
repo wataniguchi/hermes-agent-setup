@@ -76,10 +76,30 @@ right now, in this turn. Then:
    confirmed without having actually reproduced it against the live
    target this run.
 
-## Budget
+## Budget and attempt limits
 
-- At most `{{max_attempts}}` distinct techniques.
-- Stop and report if you exceed `{{time_budget_minutes}}` minutes.
+Two different limits apply. They are stated here in full — do NOT go
+reading `range_poc.py` / `range_traversal.py` to find them; that just
+burns turns.
+
+- **Within this one attempt:** try at most `{{max_attempts}}` distinct
+  techniques, and stop if you exceed `{{time_budget_minutes}}` minutes.
+- **Across attempts on this finding:** a finding may be REPORTED at most
+  3 times total — after that it's capped and no further report is
+  accepted — and successive reports for the same finding must be at least
+  30 seconds apart. You don't track these yourself: every `assign-poc`
+  and `report-poc` response already includes `attempts_used` and
+  `attempts_remaining` for this finding. Read those fields; never grep
+  the source for the numbers.
+
+**One report per finding is the normal case.** Make your best real
+attempt, report the result (`true` / `false` / `inconclusive`), and move
+on. The 3-report budget is headroom for a genuinely promising lead that
+needs a second or third refinement — it is NOT a quota to spend on every
+finding. Rigor lives in the quality of the one attempt you do make, not
+in the number of attempts. A finding you've honestly shown is
+`not_reachable` on the first try is done; do not re-report it to use up
+the budget.
 
 ## Reporting your result
 

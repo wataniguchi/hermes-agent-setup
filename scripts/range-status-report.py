@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-range_status_report.py — a human-facing statistics report over the
+range-status-report.py — a human-facing statistics report over the
 range-assess sweep's actual on-disk state in /workspace. Unlike every
 other script in this skill, it defaults to a readable text report, not
 JSON — its audience is the operator reading it directly, not the agent
@@ -34,9 +34,14 @@ a warning (empty data assumed), not a hard failure, EXCEPT the state
 file: with no state file there's nothing to report on, so that's fatal.
 
 Usage:
-    python3 range_status_report.py
-    python3 range_status_report.py --workspace /path/to/workspace
-    python3 range_status_report.py --json
+    python3 range-status-report.py
+    python3 range-status-report.py --workspace /path/to/workspace
+    python3 range-status-report.py --json
+
+See README_range-status-report.md for how to read each section — in
+particular the "Vulnerability funnel", which reconstructs how many
+findings were PROVEN exploitable and how far each got through
+remediation, from the per-finding statuses.
 """
 import argparse
 import glob
@@ -196,6 +201,52 @@ def build_report(workspace: str) -> dict:
         status_counts[finding.get("status", "unknown")] = status_counts.get(finding.get("status", "unknown"), 0) + 1
         category_counts[finding.get("category", "unknown")] = category_counts.get(finding.get("category", "unknown"), 0) + 1
 
+    # ---- vulnerability funnel (derived from the per-finding statuses) ----
+    # A finding's CURRENT status implies the path it took: a finding at
+    # `reverified_closed` necessarily passed through poc_confirmed ->
+    # remediation_applied -> reverified_closed, so the current-status counts
+    # alone let us reconstruct "how many were PROVEN exploitable, and how
+    # far each got through remediation" without a separate history.
+    #
+    #   PROVEN exploitable  = ever reached poc_confirmed. Every status below
+    #       is downstream of poc_confirmed (risk_accepted/closed_manually
+    #       only come via resolve-review, which only acts on an
+    #       already-proven, stuck finding).
+    #   A fix is ON THE BOX for remediation_applied and anything past it
+    #       (reverified_closed / reverify_failed / reverify_inconclusive).
+    #       remediation_planned means a remediation was attempted but came
+    #       back applied:false — NOT yet fixed. poc_confirmed = no fix yet.
+    #   NEEDS ATTENTION = still genuinely open: no fix (poc_confirmed),
+    #       fix wouldn't apply (remediation_planned), or fix applied but
+    #       the finding is STILL exploitable on reverify (reverify_failed).
+    PROVEN_STATUSES = [
+        "poc_confirmed", "remediation_planned", "remediation_applied",
+        "reverified_closed", "reverify_failed", "reverify_inconclusive",
+        "risk_accepted", "closed_manually",
+    ]
+    FIX_APPLIED_STATUSES = {
+        "remediation_applied", "reverified_closed",
+        "reverify_failed", "reverify_inconclusive",
+    }
+    NEEDS_ATTENTION_STATUSES = {"poc_confirmed", "remediation_planned", "reverify_failed"}
+    sc = status_counts
+    proven_total = sum(sc.get(s, 0) for s in PROVEN_STATUSES)
+    vulnerabilities = {
+        "proven_total": proven_total,
+        "proven_by_status": {s: sc.get(s, 0) for s in PROVEN_STATUSES},
+        "fix_applied": sum(sc.get(s, 0) for s in FIX_APPLIED_STATUSES),
+        "verified_closed": sc.get("reverified_closed", 0),
+        "needs_attention": sum(sc.get(s, 0) for s in NEEDS_ATTENTION_STATUSES),
+        # Context — NOT vulnerabilities, shown so the funnel reconciles
+        # against the total finding count.
+        "context": {
+            "poc_not_reachable": sc.get("poc_not_reachable", 0),
+            "poc_inconclusive": sc.get("poc_inconclusive", 0),
+            "discovered": sc.get("discovered", 0),
+            "informational": sc.get("informational", 0),
+        },
+    }
+
     # ---- PoC attempt log ----
     poc_attempt_counts = {key: len(entries) for key, entries in poc_log.items()}
     poc_total_attempts = sum(poc_attempt_counts.values())
@@ -295,6 +346,7 @@ def build_report(workspace: str) -> dict:
             "by_status": status_counts,
             "by_category": dict(sorted(category_counts.items(), key=lambda kv: -kv[1])),
         },
+        "vulnerabilities": vulnerabilities,
         "poc_attempts": {
             "findings_with_attempts": len(poc_attempt_counts),
             "total_attempts": poc_total_attempts,
@@ -356,6 +408,33 @@ def print_human_report(report: dict):
     print("  By category (top 10):")
     for k, v in list(f["by_category"].items())[:10]:
         print(f"      {k:<24} {v}")
+
+    v = report["vulnerabilities"]
+    pb = v["proven_by_status"]
+    print("\n-- Vulnerability funnel --")
+    print("   (PROVEN exploitable findings only — informational inventory and")
+    print("    not-reachable findings are NOT vulnerabilities; see README)")
+    line("Proven vulnerabilities", v["proven_total"])
+    print(f"      {'reverified_closed':<30} {pb['reverified_closed']:>4}   fixed & re-verified closed")
+    print(f"      {'remediation_applied':<30} {pb['remediation_applied']:>4}   fixed, reverify not yet run")
+    print(f"      {'reverify_inconclusive':<30} {pb['reverify_inconclusive']:>4}   fixed, reverify couldn't confirm")
+    print(f"      {'reverify_failed':<30} {pb['reverify_failed']:>4}   fix applied but STILL exploitable")
+    print(f"      {'remediation_planned':<30} {pb['remediation_planned']:>4}   remediation attempted, not applied")
+    print(f"      {'poc_confirmed':<30} {pb['poc_confirmed']:>4}   proven, no remediation yet")
+    print(f"      {'closed_manually':<30} {pb['closed_manually']:>4}   operator closed by hand")
+    print(f"      {'risk_accepted':<30} {pb['risk_accepted']:>4}   operator accepted the risk")
+    total = v["proven_total"]
+    pct = lambda n: f"{n}/{total}" + (f" ({round(100*n/total)}%)" if total else "")
+    print("   Remediation coverage of proven vulns:")
+    line("  Fix applied", pct(v["fix_applied"]))
+    line("  Verified closed", pct(v["verified_closed"]))
+    line("  Needs attention", f"{v['needs_attention']}   (poc_confirmed / remediation_planned / reverify_failed)")
+    c = v["context"]
+    print("   For context (NOT vulnerabilities):")
+    print(f"      {'poc_not_reachable':<30} {c['poc_not_reachable']:>4}   tested, not exploitable")
+    print(f"      {'poc_inconclusive':<30} {c['poc_inconclusive']:>4}   tested, couldn't determine")
+    print(f"      {'discovered':<30} {c['discovered']:>4}   risk finding, PoC still pending")
+    print(f"      {'informational':<30} {c['informational']:>4}   inventory (never a vuln claim)")
 
     p = report["poc_attempts"]
     print("\n-- PoC attempts (.range_poc_log.json) --")
