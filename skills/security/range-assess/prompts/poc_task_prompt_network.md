@@ -31,6 +31,24 @@ this purpose.
 - Finding under test (`{{finding_id}}`): service `{{service}}`,
   reported version `{{version}}`, discovered by `{{scan_method}}`.
 
+## What `reachable: true` means — read before you start
+
+`reachable: true` means you **reproduced, this turn, an actual
+compromise of THIS service over the network** — code execution,
+authentication you shouldn't have, or retrieval of data you shouldn't
+reach — and you captured the real request/response that proves it in
+`evidence`.
+
+These are **not** `reachable: true` on their own:
+
+- the port being open or the service merely responding to a probe;
+- a version banner that matches a known CVE;
+- a theoretical path you didn't actually drive against the live service.
+
+A banner match without a reproduced exploit is `inconclusive`. A service
+you showed is NOT exploitable from here is `false`. Reserve `true` for a
+compromise you actually carried out against the live target this turn.
+
 ## Task
 
 Determine whether this service, as actually running on the target, is

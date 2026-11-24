@@ -330,6 +330,52 @@ def split_table_rows(output: str) -> list[str]:
     return lines[2:] if len(lines) > 2 else []
 
 
+# A category is either a RISK condition — something an unprivileged
+# actor might actually abuse, so it's worth the PoC/remediate/reverify
+# cycle — or INVENTORY: host facts that are genuinely useful as context
+# but are NOT, on their own, an exploitable finding. Both are still
+# recorded and searchable; the difference is downstream, in
+# range_traversal.py's record-audit: a risk item becomes `discovered`
+# (enters the PoC cycle), an inventory item becomes `informational`
+# (recorded, never auto-assigned a PoC). The agent can still escalate a
+# specific inventory item it judges exploitable — an old kernel, a
+# vulnerable package version — with range_traversal.py's `escalate`
+# command; it just doesn't happen by default for every listening port
+# and running service.
+#
+# Confirmed why this matters (2026-11-24): on one host, 8 of 10
+# `poc_confirmed` results were inventory restated as "confirmed the
+# condition exists" (sshd listening, an account having a shell) — each
+# then cost a full remediate turn and a reverify turn on the slowest
+# step of the loop, and the sshd ones risked the agent cutting its own
+# SSH access mid-host. Inventory is context, not a finding to "fix."
+#
+# To retune, move a category between risk and inventory here — this one
+# dict is the whole control surface. Anything NOT listed is treated as
+# inventory (the safe default: a new check doesn't silently create PoC
+# work until you deliberately mark it risk).
+RISK_CATEGORIES = {
+    # Linux — each is a concrete local-privesc primitive an unprivileged
+    # user could try to turn into elevated access.
+    "suid_binaries", "sgid_binaries",
+    "world_writable_files", "world_writable_dirs",
+    "sudoers", "cron_system", "cron_user",
+    # Windows
+    "service_binary_paths",       # unquoted/writable service paths
+    "always_install_elevated",    # any user can install an MSI as SYSTEM
+}
+# Treated as inventory (NOT in the set above), for reference:
+#   Linux:   os_release, kernel_version, packages_dpkg, packages_rpm,
+#            listening_sockets, running_services, shell_users,
+#            sensitive_file_perms
+#   Windows: systeminfo, hotfixes, running_services, listening_ports,
+#            scheduled_tasks, local_admins
+
+
+def finding_kind(category: str) -> str:
+    return "risk" if category in RISK_CATEGORIES else "inventory"
+
+
 # Per-category splitter, Linux checks. Absent from this dict == stays
 # one bundled finding per host per category, same as before.
 SPLITTERS = {
@@ -414,11 +460,13 @@ def cmd_audit(args):
                 errors.append(f"{category}: splitter failed ({e}) — falling back to one bundled finding")
                 items = []
 
+        kind = finding_kind(category)
         if items:
             for item_text in items:
                 item_display, item_truncated = truncate(item_text)
                 findings.append({
                     "category": category,
+                    "kind": kind,
                     "description": description,
                     "command": " ".join(argv),
                     "exit_code": result["exitcode"],
@@ -429,6 +477,7 @@ def cmd_audit(args):
         else:
             findings.append({
                 "category": category,
+                "kind": kind,
                 "description": description,
                 "command": " ".join(argv),
                 "exit_code": result["exitcode"],

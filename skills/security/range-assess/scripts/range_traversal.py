@@ -57,6 +57,12 @@ nothing but this script's own commands touches a tracked status.
                                          (only attempted once network-scanned)
 
     per finding:
+        (an inventory-category audit item starts `informational` — context
+         only, no PoC — until `escalate` promotes it to `discovered`;
+         a risk-category item and every network-scan finding start
+         `discovered` directly)
+
+        informational --escalate--> discovered
         discovered -> poc_confirmed -> remediation_planned -> remediation_applied -> reverified_closed
                    |-> poc_not_reachable           (retried in place, up to       |-> reverify_failed
                    |-> poc_inconclusive              MAX_REMEDIATION_ATTEMPTS)          |
@@ -96,6 +102,7 @@ Usage:
         --remediate-script <path to range_remediate.py> --result-file <path>
     python3 range_traversal.py resolve-review --vmid <golden_vmid> --finding <finding_id> \
         --resolution accept_risk|retry|closed_manually [--note <text>]
+    python3 range_traversal.py escalate --vmid <golden_vmid> --finding <finding_id> [--reason <text>]
     python3 range_traversal.py status
     python3 range_traversal.py reset-host --vmid <golden_vmid> [--reason <text>]
 """
@@ -369,8 +376,13 @@ def host_action_list(vmid: str, rec: dict):
                         "has decided what to do with it. This does NOT block this host's other findings "
                         "or any other host.",
             })
-        # else: terminal (poc_not_reachable, poc_inconclusive, reverified_closed,
-        # risk_accepted, closed_manually) — nothing to do.
+        # else: nothing to do. This covers the terminal statuses
+        # (poc_not_reachable, poc_inconclusive, reverified_closed,
+        # risk_accepted, closed_manually) AND `informational` — an
+        # inventory item recorded for context that never enters the PoC
+        # cycle on its own. `escalate` is the only thing that moves an
+        # informational finding to `discovered`; until then it correctly
+        # produces no action here and doesn't hold up completion.
     return actions, review
 
 
@@ -552,11 +564,24 @@ def cmd_record_audit(vmid: str, working_vmid: str, target: str, audit_script: st
             # collapse back into one finding, defeating the split.
             fid = finding_id("local", f["category"], f["command"], f.get("item") or "")
             if fid not in rec["findings"]:
+                # kind comes from range_host_audit.py's RISK_CATEGORIES.
+                # A "risk" item enters the PoC cycle (`discovered`); an
+                # "inventory" item is recorded as `informational` — kept
+                # and searchable, but never auto-assigned a PoC. Default
+                # to "risk" if an older audit script didn't send a kind,
+                # so behavior only changes once the tagging audit is
+                # deployed (no silent reclassification of an in-flight
+                # sweep's existing findings — those keep whatever status
+                # they already have). The agent can promote a specific
+                # informational item with `escalate`.
+                kind = f.get("kind", "risk")
+                initial_status = "discovered" if kind == "risk" else "informational"
                 rec["findings"][fid] = {
                     "scope": "local",
                     "category": f["category"], "command": f["command"], "item": f.get("item"),
+                    "kind": kind,
                     "output": f.get("output", ""), "description": f.get("description", ""),
-                    "status": "discovered", "poc_evidence": "", "poc_method": "", "remediation_summary": "",
+                    "status": initial_status, "poc_evidence": "", "poc_method": "", "remediation_summary": "",
                 }
                 new_findings += 1
         _clear_claim(state, f"{vmid}:host")
@@ -784,6 +809,44 @@ def cmd_reset_host(vmid: str, reason: str):
     }, indent=2))
 
 
+def cmd_escalate(vmid: str, fid: str, reason: str):
+    """Promote an `informational` (inventory) finding into the PoC cycle,
+    i.e. set it to `discovered` so `next` will offer it as `assign_poc`.
+    This is the deliberate escape hatch for the inventory/risk split:
+    most inventory (a running service, an open port, an installed
+    package) is context, not a finding to exploit — but when the agent
+    spots a specific inventory item that genuinely looks exploitable (a
+    kernel at a known-vulnerable version, a service whose version has a
+    public RCE), this is how it opts that ONE item in, with a recorded
+    reason, instead of every inventory item being tested by default.
+    Only `informational` can be escalated; anything already in the PoC
+    cycle or terminal is left alone."""
+    with state_lock():
+        state = load_state()
+        if vmid not in state["hosts"] or fid not in state["hosts"][vmid]["findings"]:
+            print(json.dumps({"escalated": False, "reason": f"vmid {vmid} / finding {fid} not found in state"}, indent=2))
+            sys.exit(1)
+        finding = state["hosts"][vmid]["findings"][fid]
+        if finding["status"] != "informational":
+            print(json.dumps({
+                "escalated": False,
+                "reason": f"finding {fid} has status '{finding['status']}', not 'informational' — "
+                          "escalate only promotes an inventory item into the PoC cycle; it is not "
+                          "for re-opening a finding that's already been through it.",
+            }, indent=2))
+            sys.exit(1)
+        finding["status"] = "discovered"
+        finding.setdefault("escalation_log", []).append({
+            "reason": reason or "(no reason given)", "escalated_at": time.time(),
+        })
+        save_state(state)
+    print(json.dumps({
+        "escalated": True, "vmid": vmid, "finding_id": fid,
+        "new_status": "discovered",
+        "note": "`next` will now offer this as assign_poc like any other discovered finding.",
+    }, indent=2))
+
+
 def cmd_resolve_review(vmid: str, fid: str, resolution: str, note: str):
     """The only sanctioned way to move a finding off `reverify_failed` or
     a `remediation_planned` stuck past its retry cap — same principle
@@ -952,6 +1015,14 @@ def main():
     p_res.add_argument("--resolution", required=True, choices=sorted(VALID_RESOLUTIONS))
     p_res.add_argument("--note", default="", help="operator's reasoning — recorded in the host's review_log")
 
+    p_esc = sub.add_parser("escalate")
+    p_esc.add_argument("--vmid", required=True, help="the golden VMID (hosts.json key)")
+    p_esc.add_argument("--finding", required=True)
+    p_esc.add_argument("--reason", default="",
+                       help="why this inventory item is worth a PoC after all (e.g. "
+                            "'kernel 5.4.0-x matches CVE-xxxx, worth attempting') — recorded "
+                            "in the finding's escalation_log")
+
     sub.add_parser("status")
 
     p_rh = sub.add_parser("reset-host")
@@ -986,6 +1057,8 @@ def main():
         cmd_report_remediate(args.vmid, args.finding, args.remediate_script, args.result_file)
     elif args.command == "resolve-review":
         cmd_resolve_review(args.vmid, args.finding, args.resolution, args.note)
+    elif args.command == "escalate":
+        cmd_escalate(args.vmid, args.finding, args.reason)
     elif args.command == "status":
         cmd_status()
     elif args.command == "reset-host":

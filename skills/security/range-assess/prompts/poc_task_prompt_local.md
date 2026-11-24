@@ -34,6 +34,30 @@ this purpose.
 
   One-line summary: {{finding_description}}
 
+## What `reachable: true` means — read before you start
+
+`reachable: true` is a strong claim: it means you **demonstrated, this
+turn, that a realistic lower-privilege actor gains access they should
+not have** — code execution, a file's contents, or a higher privilege
+level — **by way of this specific condition**, and you captured the
+command output that shows it in `evidence`.
+
+The audit already established that the condition exists (its output is
+quoted above). Re-confirming existence is NOT a PoC. In particular,
+these are **not** `reachable: true` on their own:
+
+- a service being installed, enabled, running, or listening on a port;
+- an account merely existing or having a login shell;
+- a group membership, permission bit, or config value simply being
+  present.
+
+If all you can show is that the condition is there, the result is
+`reachable: false` with a one-line `notes` saying no unprivileged
+exploitation path was demonstrated — not a confirmation. Report `true`
+only when you actually moved from a lower-privilege position to a higher
+one (or to data you shouldn't reach) **through this finding**, with the
+proof. If you tried and genuinely couldn't tell, that's `inconclusive`.
+
 ## Task
 
 Determine whether this specific local condition is genuinely exploitable
