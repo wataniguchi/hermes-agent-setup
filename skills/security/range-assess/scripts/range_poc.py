@@ -207,6 +207,39 @@ def cmd_assign(args):
     }, indent=2))
 
 
+# `reachable` must end up as a real JSON boolean or the string
+# "inconclusive" — range_traversal.py maps it with
+# {True: poc_confirmed, False: poc_not_reachable}.get(..., poc_inconclusive).
+#
+# Exact string spellings of those three values ("false", "True",
+# " INCONCLUSIVE ") are normalized rather than refused: their meaning is not
+# in doubt, and refusing them costs a full slow model turn per finding to
+# fix a type slip. Confirmed for real (2026-11-24): an agent wrote 128
+# results for one host in one batch with "reachable": "false" (a string),
+# every one of which the strict check would have refused. Normalization is
+# recorded in the canonical result as "_normalized", so it stays visible.
+#
+# Everything else is still refused, because its meaning IS in doubt:
+# "no", "unlikely", "maybe", "partially", numbers, null. Numbers in
+# particular: Python treats 1 == True and 0 == False, so the original
+# `reachable not in (True, False, "inconclusive")` check silently accepted
+# 1/0 as booleans — closed here with an explicit type check.
+_REACHABLE_STRINGS = {"true": True, "false": False, "inconclusive": "inconclusive"}
+
+
+def normalize_reachable(value):
+    """Returns (value, note): `note` is None unless a string was normalized."""
+    if isinstance(value, str):
+        mapped = _REACHABLE_STRINGS.get(value.strip().lower())
+        if mapped is not None and value != mapped:
+            return mapped, f"reachable {value!r} (string) normalized to {json.dumps(mapped)}"
+    return value, None
+
+
+def is_valid_reachable(value) -> bool:
+    return isinstance(value, bool) or (isinstance(value, str) and value == "inconclusive")
+
+
 def cmd_report(args):
     if args.working_vmid == args.golden_vmid:
         print(json.dumps({
@@ -221,13 +254,26 @@ def cmd_report(args):
     with open(args.result_file) as f:
         result = json.load(f)
 
-    reachable = result.get("reachable")
-    if reachable not in (True, False, "inconclusive"):
+    raw_reachable = result.get("reachable")
+    reachable, normalized_note = normalize_reachable(raw_reachable)
+    if not is_valid_reachable(reachable):
         print(json.dumps({
             "reported": False,
-            "reason": f"--result-file's 'reachable' field must be true, false, or \"inconclusive\" — got {reachable!r}",
+            "reason": (
+                f"--result-file's 'reachable' field must be the JSON boolean true or false, or the "
+                f"string \"inconclusive\" — got {raw_reachable!r}. Rewrite that field and report again; "
+                "nothing was logged and no attempt was consumed."
+            ),
         }, indent=2))
         sys.exit(1)
+    if normalized_note:
+        # The canonical copy and the attempt log carry the normalized value
+        # plus a record that normalization happened; the agent's own draft
+        # file is left exactly as it wrote it.
+        result["reachable"] = reachable
+        result.setdefault("_normalized", []).append(normalized_note)
+    # Runs AFTER normalization on purpose: a string "true" gets exactly the
+    # same evidence requirement as a real boolean true.
     if reachable is True and not str(result.get("evidence", "")).strip():
         print(json.dumps({
             "reported": False,
@@ -260,12 +306,15 @@ def cmd_report(args):
     with open(canonical_path, "w") as f:
         json.dump(result, f, indent=2)
 
-    print(json.dumps({
+    output = {
         "reported": True, "finding_id": args.finding_id, "reachable": reachable,
         "method": result.get("method", ""), "evidence": result.get("evidence", ""),
         "attempts_used": len(log[key]), "attempts_remaining": MAX_ATTEMPTS_PER_FINDING - len(log[key]),
         "canonical_result_file": canonical_path,
-    }, indent=2))
+    }
+    if normalized_note:
+        output["normalized"] = normalized_note
+    print(json.dumps(output, indent=2))
 
 
 def main():

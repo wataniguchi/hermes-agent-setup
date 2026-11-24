@@ -23,15 +23,23 @@ Setup:
 
 import base64
 import os
+import re
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime
 
 import requests
 import urllib3
 from fastapi import FastAPI, HTTPException
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -118,6 +126,39 @@ async def log_with_timestamp(request, call_next):
     return response
 
 
+# The middleware above only ever sees a status code — never WHY a request
+# failed. Confirmed this cost a real investigation: two /vm/clone calls
+# returned 400, and the only way to learn the reason was to dig through
+# Proxmox's own task and pveproxy access logs on the host, because the
+# detail (Proxmox's own error text, passed through by pve_request) went
+# back to the calling agent and nowhere else. Log it here too, so the
+# bridge log alone answers "what went wrong" for every non-2xx it returns.
+# Registered on Starlette's HTTPException (FastAPI's is a subclass), so
+# routing errors (404/405) are covered as well as the ones raised below.
+def _log_error_detail(request, status_code: int, detail) -> None:
+    text = str(detail).replace("\n", " ")
+    if len(text) > 1000:
+        text = text[:1000] + "...(truncated)"
+    print(
+        f"{_log_timestamp()} {request.method} {request.url.path} error {status_code}: {text}",
+        flush=True,
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def log_http_exception(request, exc):
+    _log_error_detail(request, exc.status_code, exc.detail)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def log_validation_error(request, exc):
+    # 422 — the request body didn't match the endpoint's schema. Seen in
+    # practice when an agent guessed at /exec and /file payload shapes.
+    _log_error_detail(request, 422, exc.errors())
+    return await request_validation_exception_handler(request, exc)
+
+
 def pve_url(path: str) -> str:
     return f"{PVE_HOST}/api2/json/nodes/{PVE_NODE}{path}"
 
@@ -188,6 +229,219 @@ class CloneRequest(BaseModel):
     storage: str = "hot-ssd"
 
 
+# A clone is NOT finished when Proxmox's clone task finishes — clone_vm
+# still has to put the golden image's net0 (and so its MAC) back onto the
+# new VM afterwards. Confirmed for real (2026-11-24, vmids 9610 and 9612):
+# the agent called /vm/{vmid}/start while /vm/clone was still running.
+# Proxmox's start task waited on the VM's config lock, grabbed it the
+# instant the clone task released it, and booted the VM with the random
+# MAC Proxmox assigns every clone; clone_vm's net0 PUT then hit a starting/
+# running VM and Proxmox rejected it (400 in pveproxy's access log). The
+# VM was up but on the wrong MAC, so unreachable at its range address,
+# and both hosts were recorded scan_failed.
+#
+# GET /vm/{vmid}/status could not have warned anyone: Proxmox creates the
+# new VM's config at the START of a clone, so status reports exists/stopped
+# for the whole copy. Only /vm/clone returning tells you it's done.
+#
+# Guard: every vmid a clone_vm call is currently working on is recorded
+# here, from before the clone starts until net0 has been verified; start_vm
+# refuses those outright. Same principle as guard_not_template: enforced in
+# the bridge itself, not left to a client remembering a rule. In-memory on
+# purpose — it assumes ONE bridge process, which is what this file's own
+# documented uvicorn command runs (no --workers). A bridge restart mid-clone
+# loses the set, but that also drops the in-flight /vm/clone request itself;
+# start_vm's Proxmox-side config-lock check below is the backstop for that
+# case and for clones started outside this bridge.
+_clone_guard_lock = threading.Lock()
+_clones_in_progress: set[int] = set()
+
+_MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
+
+
+def _mac_of(net_value: str | None) -> str | None:
+    m = _MAC_RE.search(net_value or "")
+    return m.group(1).upper() if m else None
+
+
+def _clone_in_progress(vmid: int) -> bool:
+    with _clone_guard_lock:
+        return vmid in _clones_in_progress
+
+
+def _put_net0_with_retries(vmid: int, net0: str, attempts: int = 3) -> HTTPException | None:
+    """PUT net0, retrying a few times — a config update can transiently
+    fail on the VM's config lock (e.g. a task on the same VM still
+    finishing). Returns the last error, or None on success."""
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            pve_request("PUT", f"/qemu/{vmid}/config", data={"net0": net0})
+            return None
+        except HTTPException as exc:
+            last_err = exc
+            if attempt < attempts - 1:
+                time.sleep(3)
+    return last_err
+
+
+def _restore_template_net0(vmid: int, template_net0: str) -> None:
+    """Make the clone carry the golden image's exact net0 (same MAC), and
+    make sure it will actually BOOT with it.
+
+    If the VM is already running at this point, something started it
+    before /vm/clone finished (start_vm's guard should prevent that via
+    this bridge, so this means a restarted bridge or a start from outside
+    it). A running VM that booted on the wrong MAC can't be fixed in
+    place reliably — a MAC change on a running VM is either left pending
+    until restart or hot-swapped under a guest that already configured
+    its network — so stop it, apply net0, verify, and tell the caller to
+    start it again. The clone itself is fine; only the early boot is
+    undone."""
+    want_mac = _mac_of(template_net0)
+    put_err = _put_net0_with_retries(vmid, template_net0)
+
+    status = pve_request("GET", f"/qemu/{vmid}/status/current")
+    was_running = status.get("status") == "running"
+    if was_running:
+        stop_upid = pve_request("POST", f"/qemu/{vmid}/status/stop")
+        wait_for_task(stop_upid)
+        put_err = _put_net0_with_retries(vmid, template_net0)
+
+    # current=1: Proxmox's config GET returns PENDING values by default;
+    # we need what the VM will actually have.
+    current = pve_request("GET", f"/qemu/{vmid}/config", params={"current": 1})
+    have_mac = _mac_of(current.get("net0"))
+    if want_mac and have_mac != want_mac:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"clone of vmid {vmid} finished, but its net0 could not be set to "
+                f"the golden image's (want MAC {want_mac}, have {have_mac}). It will "
+                "NOT get its range address. Do not start or scan it — destroy it and "
+                f"clone again. Last Proxmox error: "
+                f"{put_err.detail if put_err else '(none — PUT accepted but not applied)'}"
+            ),
+        )
+    if was_running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"vmid {vmid} was STARTED before /vm/clone finished, so it booted "
+                "with the wrong MAC and would not have been reachable at its range "
+                "address. The bridge has stopped it and applied the golden image's "
+                f"net0 (MAC {want_mac}). The clone itself is fine and is now STOPPED — "
+                f"call POST /vm/{vmid}/start once, and only now."
+            ),
+        )
+
+
+# ---------- Storage capacity ----------
+#
+# Confirmed for real (2026-11-23): the hot-ssd LVM thin pool reached 93.58%
+# data usage, an lvcreate under a parallel clone burst stalled instead of
+# failing, and because it held the volume group lock, every later clone,
+# destroy and even the Proxmox web UI hung for 7+ hours with no error
+# surfaced (requests just timed out as 504s). range-assess's SKILL.md then
+# told the agent to check headroom with `lvs` before cloning — but `lvs`
+# only runs on the Proxmox host, and the agent has no shell there. Confirmed
+# on 2026-11-24: it guessed at ~10 nonexistent bridge endpoints (/storage,
+# /lvs, /pool, ...), found nothing, and cloned without checking. So: give it
+# a real read-only endpoint, AND enforce the limit in /vm/clone itself, the
+# same way the golden-image and mid-clone guards are enforced here rather
+# than left to a rule in a prompt.
+#
+# Source: Proxmox's own storage status API. For an lvmthin storage its
+# `used`/`total` come from the thin pool's own data usage — the same Data%
+# `lvs` shows. (Metadata% is not available through this API; Data% is the
+# one the 2026-11-23 incident turned on.)
+#
+# Two limits, both overridable via env:
+#   - current usage at/above CLONE_MAX_USED_PERCENT (default 75) -> refuse:
+#     time to destroy finished hosts' clones first.
+#   - projected usage (current + the template's full provisioned disk size,
+#     a worst case for a full clone) above CLONE_MAX_PROJECTED_PERCENT
+#     (default 95) -> refuse: this one clone could fill the pool outright.
+CLONE_MAX_USED_PERCENT = float(os.environ.get("BRIDGE_CLONE_MAX_USED_PERCENT", "75"))
+CLONE_MAX_PROJECTED_PERCENT = float(os.environ.get("BRIDGE_CLONE_MAX_PROJECTED_PERCENT", "95"))
+
+_STORAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_DISK_KEY_RE = re.compile(r"^(scsi|sata|virtio|ide|efidisk|tpmstate)\d+$")
+_SIZE_RE = re.compile(r"(?:^|,)size=(\d+(?:\.\d+)?)([KMGT]?)", re.IGNORECASE)
+_SIZE_MULT = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+def _template_disk_bytes(template_config: dict) -> int:
+    """Sum of the template's provisioned disk sizes (CD-ROMs excluded) —
+    an upper bound on what a full clone can allocate."""
+    total = 0
+    for key, value in template_config.items():
+        if not _DISK_KEY_RE.match(key) or not isinstance(value, str):
+            continue
+        if "media=cdrom" in value or value.startswith("none"):
+            continue
+        m = _SIZE_RE.search(value)
+        if m:
+            total += int(float(m.group(1)) * _SIZE_MULT[m.group(2).upper()])
+    return total
+
+
+def _storage_report(storage: str, template_config: dict | None = None) -> dict:
+    if not _STORAGE_NAME_RE.match(storage):
+        raise HTTPException(status_code=400, detail=f"invalid storage name {storage!r}")
+    st = pve_request("GET", f"/storage/{storage}/status")
+    total = int(st.get("total") or 0)
+    used = int(st.get("used") or 0)
+    active = bool(st.get("active"))
+    used_pct = round(used * 100 / total, 2) if total else None
+    report = {
+        "storage": storage,
+        "type": st.get("type"),
+        "active": active,
+        "total_gib": round(total / 1024**3, 1),
+        "used_gib": round(used / 1024**3, 1),
+        "avail_gib": round(int(st.get("avail") or 0) / 1024**3, 1),
+        "used_percent": used_pct,
+        "clone_max_used_percent": CLONE_MAX_USED_PERCENT,
+        "clone_max_projected_percent": CLONE_MAX_PROJECTED_PERCENT,
+    }
+    reasons = []
+    if not active or not total:
+        reasons.append(f"storage {storage} is not active or reports no capacity")
+    elif used_pct >= CLONE_MAX_USED_PERCENT:
+        reasons.append(
+            f"{storage} is at {used_pct}% data usage (limit {CLONE_MAX_USED_PERCENT}%). "
+            "Destroy finished hosts' working clones (stop + DELETE) before cloning more — "
+            "a nearly full thin pool can hang ALL storage operations rather than fail cleanly."
+        )
+    if template_config is not None and total:
+        clone_bytes = _template_disk_bytes(template_config)
+        projected = round((used + clone_bytes) * 100 / total, 2)
+        report["template_disk_gib"] = round(clone_bytes / 1024**3, 1)
+        report["projected_percent"] = projected
+        if projected > CLONE_MAX_PROJECTED_PERCENT:
+            reasons.append(
+                f"cloning this template (up to {report['template_disk_gib']} GiB) could take "
+                f"{storage} to {projected}% (limit {CLONE_MAX_PROJECTED_PERCENT}%). Destroy "
+                "finished hosts' working clones first."
+            )
+    report["ok_to_clone"] = not reasons
+    report["reason"] = " ".join(reasons) if reasons else "headroom OK"
+    return report
+
+
+@app.get("/storage/{storage}/status")
+def storage_status(storage: str, template_vmid: int | None = None):
+    """Read-only capacity check for a clone target storage (e.g. hot-ssd).
+    Pass ?template_vmid=<golden vmid> to also get the projected usage after
+    cloning that template. /vm/clone applies the same check itself and
+    refuses with 507 when ok_to_clone would be false."""
+    template_config = (
+        pve_request("GET", f"/qemu/{template_vmid}/config") if template_vmid is not None else None
+    )
+    return _storage_report(storage, template_config)
+
+
 @app.post("/vm/clone")
 def clone_vm(req: CloneRequest):
     if req.new_vmid in PVE_GOLDEN_VMIDS:
@@ -199,41 +453,63 @@ def clone_vm(req: CloneRequest):
             ),
         )
     # Proxmox gives a full clone's NIC a fresh, randomly generated MAC by
-    # default — confirmed against a real clone here. This range's dnsmasq
-    # static reservations (range-gw/dnsmasq.d/range.conf) are keyed to each
-    # golden image's OWN original MAC, so a clone with a regenerated MAC
-    # gets no matching DHCP reservation at all, and — if the guest's own
-    # network config (e.g. a NetworkManager profile pinned to that MAC via
-    # HWADDR/mac-address=) only activates for that exact MAC — its NIC can
-    # come up administratively down too, with no IP and no obvious link to
-    # "wrong MAC" from inside the guest.
+    # default — confirmed against a real clone here. A clone only reproduces
+    # its golden image's network reachability (which the operator verified
+    # per golden image, IPv4 and IPv6, at build time) if it carries that
+    # golden image's exact MAC:
+    #   - most hosts get their address from range-gw's dnsmasq static
+    #     reservations (range-gw/dnsmasq.d/range.conf), keyed to each golden
+    #     image's OWN original MAC — a regenerated MAC gets no reservation;
+    #   - some hosts (e.g. beg-rtu-host) are addressed statically inside the
+    #     guest (systemd-networkd) instead; the same rule applies — keep the
+    #     golden MAC and the clone behaves exactly as the verified golden did.
+    # A guest network config pinned to the MAC (NetworkManager HWADDR/
+    # mac-address=, networkd [Match] MACAddress=) can also leave the NIC
+    # unconfigured on a different MAC, with no obvious "wrong MAC" symptom
+    # from inside the guest.
     #
     # Fix: read the template's own net0 line and force the clone to carry
-    # the identical value (same MAC, same model/bridge/etc.), so the
-    # existing per-vmid dnsmasq reservation and the guest's own network
-    # config keep working unchanged, with no new per-vmid config to
-    # maintain here. Safe under the existing golden/working invariant
-    # (only one working clone of a given golden vmid is ever live at a
-    # time), so the MAC is never duplicated on the wire.
-    template_config = pve_request("GET", f"/qemu/{req.template_vmid}/config")
-    template_net0 = template_config.get("net0")
+    # the identical value (same MAC, same model/bridge/etc.). Safe under the
+    # existing golden/working invariant (only one working clone of a given
+    # golden vmid is ever live at a time), so the MAC is never duplicated on
+    # the wire.
+    with _clone_guard_lock:
+        if req.new_vmid in _clones_in_progress:
+            raise HTTPException(
+                status_code=409,
+                detail=f"a clone onto vmid {req.new_vmid} is already in progress on this bridge.",
+            )
+        _clones_in_progress.add(req.new_vmid)
+    try:
+        template_config = pve_request("GET", f"/qemu/{req.template_vmid}/config")
+        template_net0 = template_config.get("net0")
 
-    upid = pve_request(
-        "POST",
-        f"/qemu/{req.template_vmid}/clone",
-        data={
-            "newid": req.new_vmid,
-            "name": req.name,
-            "full": 1,
-            "storage": req.storage,
-        },
-    )
-    wait_for_task(upid)
+        # Capacity gate — see _storage_report above for the real incident.
+        # Refuses BEFORE anything is created on Proxmox, so a refused clone
+        # leaves nothing behind.
+        report = _storage_report(req.storage, template_config)
+        if not report["ok_to_clone"]:
+            raise HTTPException(status_code=507, detail=report["reason"])
 
-    if template_net0:
-        pve_request("PUT", f"/qemu/{req.new_vmid}/config", data={"net0": template_net0})
+        upid = pve_request(
+            "POST",
+            f"/qemu/{req.template_vmid}/clone",
+            data={
+                "newid": req.new_vmid,
+                "name": req.name,
+                "full": 1,
+                "storage": req.storage,
+            },
+        )
+        wait_for_task(upid)
 
-    return {"vmid": req.new_vmid, "status": "cloned"}
+        if template_net0:
+            _restore_template_net0(req.new_vmid, template_net0)
+
+        return {"vmid": req.new_vmid, "status": "cloned", "mac": _mac_of(template_net0)}
+    finally:
+        with _clone_guard_lock:
+            _clones_in_progress.discard(req.new_vmid)
 
 
 @app.get("/vm/{vmid}/status")
@@ -273,18 +549,73 @@ def vm_status(vmid: int):
         ):
             return {"vmid": vmid, "exists": False}
         raise
+    in_progress = _clone_in_progress(vmid)
     return {
         "vmid": vmid,
         "exists": True,
         "status": status.get("status"),
         "name": status.get("name"),
         "uptime": status.get("uptime"),
+        # "stopped" alone is NOT "ready" — Proxmox creates the config at the
+        # start of a clone. These two fields say whether it's still being
+        # built: Proxmox's own config lock (e.g. "clone"), and whether this
+        # bridge is still inside /vm/clone for it (net0 not yet restored).
+        "lock": status.get("lock"),
+        "clone_in_progress": in_progress,
+        "ready_to_start": (not in_progress) and not status.get("lock")
+                          and status.get("status") == "stopped",
     }
+
+
+_CLONE_WAIT_HINT = {
+    "start": "Starting now would boot it on the wrong MAC. Wait for /vm/clone to "
+             "return 200, then start.",
+    "stop": "There is nothing running to stop yet. Wait for /vm/clone to return.",
+    "destroy": "Destroying it now would throw away a clone that is still being "
+               "built (and very possibly about to succeed). Wait for /vm/clone to "
+               "return; only destroy it if that call comes back non-200.",
+    "rollback": "Wait for /vm/clone to return 200 first.",
+}
+
+
+def refuse_if_being_cloned(vmid: int, action: str) -> None:
+    """Refuse a mutating call against a vmid whose clone isn't finished.
+
+    start: see _clones_in_progress above for the real incident (wrong-MAC
+    boot). destroy/stop: confirmed for real on 2026-11-24 — an agent,
+    after 11 failed start attempts on a Windows clone still mid-copy,
+    issued DELETE against it 2 minutes before the clone completed
+    successfully. Proxmox's own config lock happened to refuse it that
+    time, but that lock is released when the disk copy ends, BEFORE this
+    bridge restores the golden net0 — so a DELETE landing in that window
+    would have succeeded and destroyed a good clone. The in-memory set
+    covers that window; the Proxmox lock check is the backstop for a clone
+    this bridge isn't tracking (bridge restarted mid-clone, or a clone
+    started outside the bridge)."""
+    hint = _CLONE_WAIT_HINT[action]
+    if _clone_in_progress(vmid):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"vmid {vmid} is still being cloned — /vm/clone has not returned yet "
+                f"(its golden net0/MAC is applied at the very end). {hint}"
+            ),
+        )
+    config = pve_request("GET", f"/qemu/{vmid}/config")
+    if config.get("lock"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"vmid {vmid} is locked by Proxmox ('{config.get('lock')}') — an "
+                f"operation such as a clone is still running on it. {hint}"
+            ),
+        )
 
 
 @app.post("/vm/{vmid}/start")
 def start_vm(vmid: int):
     guard_not_template(vmid)
+    refuse_if_being_cloned(vmid, "start")
     upid = pve_request("POST", f"/qemu/{vmid}/status/start")
     wait_for_task(upid)
     return {"vmid": vmid, "status": "started"}
@@ -293,6 +624,7 @@ def start_vm(vmid: int):
 @app.post("/vm/{vmid}/stop")
 def stop_vm(vmid: int):
     guard_not_template(vmid)
+    refuse_if_being_cloned(vmid, "stop")
     upid = pve_request("POST", f"/qemu/{vmid}/status/stop")
     wait_for_task(upid)
     return {"vmid": vmid, "status": "stopped"}
@@ -301,6 +633,7 @@ def stop_vm(vmid: int):
 @app.post("/vm/{vmid}/rollback")
 def rollback_vm(vmid: int, snapname: str = "clean-tooled"):
     guard_not_template(vmid)
+    refuse_if_being_cloned(vmid, "rollback")
     upid = pve_request("POST", f"/qemu/{vmid}/snapshot/{snapname}/rollback")
     wait_for_task(upid)
     return {"vmid": vmid, "status": f"rolled back to {snapname}"}
@@ -309,6 +642,7 @@ def rollback_vm(vmid: int, snapname: str = "clean-tooled"):
 @app.delete("/vm/{vmid}")
 def destroy_vm(vmid: int):
     guard_not_template(vmid)
+    refuse_if_being_cloned(vmid, "destroy")
     status = pve_request("GET", f"/qemu/{vmid}/status/current")
     if status.get("status") == "running":
         stop_upid = pve_request("POST", f"/qemu/{vmid}/status/stop")

@@ -107,7 +107,8 @@ tradeoff here, not an oversight).
 ## Usage — single host, one pass through the loop
 
 ```
-# 1. Clone + start the working image (proxmox_bridge.py, not this skill)
+# 1. Clone + start the working image (proxmox_bridge.py, not this skill).
+#    Start ONLY after the clone call has returned 200 — see "Cloning" below.
 curl -X POST http://host.docker.internal:8811/vm/clone -d '{"template_vmid": 9001, "new_vmid": 1234, "name": "example-linux-host-ctf"}'
 curl -X POST http://host.docker.internal:8811/vm/1234/start
 
@@ -372,19 +373,24 @@ successfully. It then had to clone a third time from scratch. One
 `--os`-level timeout mismatch, one wasted clone (and the minutes it
 takes), zero actual bugs in the clone logic itself.
 
-Three rules that prevent this entirely:
+Four rules that prevent this entirely:
 
-1. **Issue `/vm/clone` and `/vm/<vmid>/start` as a background command
+1. **Issue `/vm/clone` and `/vm/<vmid>/start` as background commands
    from the very first attempt** — never foreground-first-and-fall-
    back. Then poll or wait on that one background call for its actual
-   result, rather than guessing from a local timeout.
+   result, rather than guessing from a local timeout. The two are
+   sequential, never parallel: `start` is issued only after the
+   background `/vm/clone` call has returned — see rule 4.
 2. **A failed, timed-out, or ambiguous clone/start response is not
    proof the VM wasn't created.** Before deleting anything, check
-   whether the vmid already exists and is further along than the
-   error suggests (e.g. try `/vm/<vmid>/start` and read what kind of
-   failure comes back — "doesn't exist yet" and "already running"
-   fail differently) — or just wait and re-check, rather than sending
-   a second mutating call for the same vmid.
+   whether the vmid already exists and how far along it is with the
+   read-only `GET /vm/<vmid>/status` (see "Checking whether a working
+   clone still exists" below — `exists`, `lock`, `clone_in_progress`,
+   `ready_to_start`) — or just wait and re-check, rather than sending
+   a second mutating call for the same vmid. **Never probe with
+   `/vm/<vmid>/start`** to find out whether a clone is done: a start
+   that lands while the clone is still finishing boots the VM on the
+   wrong MAC (rule 4).
 3. **Never have more than one `/vm/clone` in flight across the whole
    range at once.** Cloning is a heavy disk-copy operation on ONE
    shared Proxmox host and storage backend — it does not get the
@@ -415,6 +421,44 @@ Three rules that prevent this entirely:
    for claiming PoC/remediate/audit actions across already-provisioned
    hosts — never use it, or any ad hoc script, to drive more than one
    host's `clone_and_scan` concurrently.
+4. **Start a working clone only after `/vm/clone` has returned `200` —
+   and never scan one whose clone call didn't.** A clone is not finished
+   when Proxmox's copy finishes: the bridge then sets the clone's `net0`
+   back to the golden image's exact MAC, which is what gives it its
+   range address (dnsmasq reservations on range-gw are keyed to the
+   golden MAC; statically-addressed hosts were verified reachable with
+   that MAC too). `GET /vm/<vmid>/status` shows `exists: true, status:
+   stopped` from the very START of a clone, so "stopped" is not "ready"
+   — only `/vm/clone` returning `200` (or `ready_to_start: true`) is.
+   Confirmed for real: on two hosts (9110→9610, 9112→9612) `start` was
+   sent ~10s before `/vm/clone` returned. The VM booted on the random
+   MAC Proxmox gives every clone, the bridge's MAC update was then
+   rejected (`/vm/clone` → `400`), and the agent carried on and ran
+   `record-scan` against an address the VM never had. Both hosts were
+   recorded `scan_failed` — which `range_traversal.py` treats as a dead
+   end (`next` never offers that host again; recovery needs an operator
+   `reset-host`). The bridge now refuses this itself (`start` → `409`
+   while a clone is in progress), but read its responses this way:
+   - `/vm/clone` → `200`: start it, then scan.
+   - `/vm/<vmid>/start` → `409` "still being cloned" / "locked by
+     Proxmox": not an error to work around — wait for the background
+     `/vm/clone` call to return, then start.
+   - `/vm/clone` → `409` "was STARTED before /vm/clone finished": the
+     bridge has already stopped the VM and applied the golden MAC. The
+     clone is fine — start it once, then scan.
+   - `/vm/clone` → any other non-`200` (e.g. `500` "net0 could not be
+     set"): do NOT start or scan that vmid. Check it with `GET
+     /vm/<vmid>/status`; if it exists, destroy it (stop + `DELETE`) and
+     clone again. Rule 2's "a failed call is not a failed clone" is
+     about not deleting a clone that's still in progress — it is NOT
+     permission to use a clone whose call came back non-`200`.
+   - Before `record-scan`, confirm the target actually answers at its
+     range address (e.g. `ping -c 2 -W 2 <ip>` from the sandbox, or
+     `nmap -sn <ip>` if ping isn't installed — retried for a few minutes
+     while it boots). If it never answers, check the
+     clone (status, MAC) instead of recording — `record-scan` on an
+     unreachable target writes `scan_failed`, and that can't be undone
+     without an operator.
 
 ## Storage capacity: `hot-ssd` cannot physically hold every clone at once
 
@@ -456,15 +500,30 @@ Two rules:
    a finished host's clone sitting around while working through the
    rest of the range. Check this explicitly; don't assume it already
    happened.
-2. **Before issuing `/vm/clone`, check the pool actually has headroom**:
+2. **Before issuing `/vm/clone`, check the pool actually has headroom**
+   through the bridge (you have no shell on the Proxmox host, so `lvs`
+   is not available to you):
    ```
-   lvs -o+data_percent,metadata_percent hot-ssd-vg/hot-ssd-pool
+   curl -s "http://host.docker.internal:8811/storage/hot-ssd/status?template_vmid=<golden_vmid>"
    ```
-   If `Data%` is already high (treat anything above ~70-75% as a signal
-   to pause and destroy some finished hosts' clones first, not as "still
-   fine"), do not clone into it — the failure mode when this pool runs
-   genuinely out of space is not a clean error, it's the kind of
-   multi-hour silent hang described above.
+   It returns the pool's `used_percent` (the thin pool's Data%), the
+   template's worst-case clone size (`template_disk_gib`), the
+   `projected_percent` after cloning it, and `ok_to_clone`. If
+   `ok_to_clone` is false, do not clone: destroy finished hosts' working
+   clones first (rule 1), then check again. The bridge enforces the same
+   limits itself — `/vm/clone` returns `507` with the same `reason` when
+   usage is at/above 75% or the clone could push it above 95% — so a
+   `507` means "free space first", never "retry". The failure mode when
+   this pool runs genuinely out of space is not a clean error, it's the
+   kind of multi-hour silent hang described above. If every finished
+   host's clone is already gone and it still says no, stop and report it
+   — that's an operator decision, not something to work around.
+
+   The bridge's full list of endpoints is at
+   `GET http://host.docker.internal:8811/openapi.json` — read that
+   instead of guessing at paths (confirmed for real: an agent probed
+   `/storage`, `/lvs`, `/pool`, `/volumes`, ... — all 404 — looking for
+   this check before it existed, then cloned without it).
 
 ## Checking whether a working clone still exists, and recovering if it doesn't
 
@@ -473,7 +532,12 @@ this vmid still exist, and what's it doing" check — use it instead of
 guessing from a mutating call's side effects. It returns
 `{"vmid": ..., "exists": false}` for a vmid that's gone, or
 `{"vmid": ..., "exists": true, "status": "running"|"stopped", ...}`
-otherwise.
+otherwise. For an existing vmid it also returns `lock` (Proxmox's own
+config lock, e.g. `"clone"` while a clone is copying),
+`clone_in_progress` (the bridge is still inside `/vm/clone` for it —
+the golden MAC isn't applied yet), and `ready_to_start` (true only when
+neither of those holds and the VM is stopped). Use these — not
+`status: stopped` alone — to tell whether a fresh clone is finished.
 
 This exists because of a real gap, found live: an operator manually
 destroyed a working clone directly in Proxmox (outside this bridge,
