@@ -108,14 +108,20 @@ burns turns.
   `attempts_remaining` for this finding. Read those fields; never grep
   the source for the numbers.
 
-**One report per finding is the normal case.** Make your best real
-attempt, report the result (`true` / `false` / `inconclusive`), and move
-on. The 3-report budget is headroom for a genuinely promising lead that
-needs a second or third refinement — it is NOT a quota to spend on every
-finding. Rigor lives in the quality of the one attempt you do make, not
-in the number of attempts. A finding you've honestly shown is
-`not_reachable` on the first try is done; do not re-report it to use up
-the budget.
+**Match your persistence to the lead.** Many local conditions settle in
+one honest attempt — you `su` to the unprivileged account, try the
+thing, and either reach a higher privilege or clearly cannot. But when a
+first attempt leaves a real lead open — the privileged consumer exists
+but you haven't yet made it trust your input, the sudo rule runs but you
+haven't found the argument that turns it into a shell, the SUID binary
+does something you haven't finished bending — that unproven lead is
+exactly what the 3-report budget is for: refine and come back before you
+record `not_reachable`. A finding is `false` or `inconclusive` when
+you've genuinely driven at it and it resists, not when you've only ruled
+out your first idea. Depth on a promising finding beats breadth across
+many. The one thing the budget is NOT for is re-reporting a condition
+you've already honestly shown to be inert — that adds nothing; stop
+there.
 
 ## Reporting your result
 

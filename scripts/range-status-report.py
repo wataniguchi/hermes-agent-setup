@@ -141,6 +141,56 @@ def find_sweep_start(workspace: str):
     return None, None, f"no '--- Attempt #N (init|resume): ...' lines found in {log_path}"
 
 
+# The watchdog stamps each attempt's end the same locale-`date` way it stamps
+# the launch, e.g. "--- Attempt #7 exited (code 0): 2026年 11月26日 ... 07時...秒 JST ---".
+EXIT_HEADER_RE = re.compile(
+    r"--- Attempt #(\d+) exited \(code (-?\d+)\): "
+    r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日.*?"
+    r"(\d{1,2})時\s*(\d{1,2})分\s*(\d{1,2})秒"
+)
+# What the watchdog prints ONLY on a confirmed graceful completion (is-done
+# JSON teed to the log, plus its own sentence). Any of these after the sweep's
+# (init) anchor means the sweep ended on its own rather than still running.
+COMPLETE_MARKERS = ('"done": true', '"done_pending_review": true',
+                    "Sweep is genuinely complete")
+
+
+def find_sweep_end(workspace: str, start_ts):
+    """If the watchdog log shows this sweep GRACEFULLY completed, return
+    (ended_at, basis, None) — the final attempt-exit timestamp — so runtime
+    is measured to the real end instead of to now(). Returns (None, None,
+    None) when no completion marker is found after the sweep's start (still
+    running, or interrupted): the caller then falls back to now().
+
+    Only the slice of the log from the current sweep's (init) anchor onward is
+    considered, so a stale completion marker from an earlier, since-cleared run
+    in the same log can't falsely end this one.
+    """
+    log_path = os.path.join(workspace, ".range-sweep-watchdog-output.log")
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None, None, None
+
+    init_matches = [m for m in ATTEMPT_HEADER_RE.finditer(text) if m.group(2) == "init"]
+    tail = text[init_matches[-1].start():] if init_matches else text
+    if not any(mark in tail for mark in COMPLETE_MARKERS):
+        return None, None, None
+
+    last_exit = None
+    for m in EXIT_HEADER_RE.finditer(tail):
+        y, mo, d, h, mi, s = (int(g) for g in m.groups()[2:])
+        ts = datetime(y, mo, d, h, mi, s, tzinfo=JST)
+        if start_ts is not None and ts < start_ts:
+            continue
+        if last_exit is None or ts > last_exit:
+            last_exit = ts
+    if last_exit is None:
+        return None, None, None
+    return last_exit, "watchdog graceful completion", None
+
+
 def build_report(workspace: str) -> dict:
     warnings = []
 
@@ -162,11 +212,17 @@ def build_report(workspace: str) -> dict:
         warnings.append(warn)
     sweep_runtime = None
     if sweep_started_at is not None:
-        now_jst = datetime.now(tz=JST)
-        elapsed = (now_jst - sweep_started_at).total_seconds()
+        ended_at, ended_basis, _ = find_sweep_end(workspace, sweep_started_at)
+        # Measure to the real end once the sweep has gracefully exited;
+        # otherwise (still running / interrupted) measure to now, as before.
+        endpoint = ended_at if ended_at is not None else datetime.now(tz=JST)
+        elapsed = (endpoint - sweep_started_at).total_seconds()
         sweep_runtime = {
             "started_at": sweep_started_at.isoformat(),
             "started_mode": sweep_start_mode,
+            "ended_at": ended_at.isoformat() if ended_at is not None else None,
+            "ended_basis": ended_basis,
+            "running": ended_at is None,
             "elapsed_seconds": elapsed,
             "elapsed_human": fmt_duration(elapsed),
         }
@@ -386,7 +442,11 @@ def print_human_report(report: dict):
     print("\n-- Sweep runtime (JST) --")
     if sr:
         line("Started", f"{sr['started_at']}  ({sr['started_mode']})")
-        line("Elapsed", sr["elapsed_human"])
+        if sr.get("running"):
+            line("Elapsed", f"{sr['elapsed_human']}  (running — measured to report time)")
+        else:
+            line("Ended", f"{sr['ended_at']}  ({sr['ended_basis']})")
+            line("Elapsed", f"{sr['elapsed_human']}  (final)")
     else:
         line("Elapsed", "(unknown - see warnings above)")
 

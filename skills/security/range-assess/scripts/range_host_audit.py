@@ -30,6 +30,21 @@ networking fix). This script's command-execution shape changed; the
 privilege model (full root/Administrator access) and everything it
 implies for the PRIVILEGE CAVEAT below did not.
 
+ONE SSH CONNECTION PER HOST (added after a real failure): the audit used
+to open a brand-new SSH connection for the probe and for every check — on
+Windows that's ~9 fresh TCP/auth/banner handshakes in a tight loop, which
+tripped Windows OpenSSH's anti-brute-force throttle ("Connection timed out
+during banner exchange") and failed the local audit of at least one host
+(mail-beg) partway through, leaving it `audit_failed` even though it was
+reachable and had no real local findings. The checks now share a SINGLE
+SSH connection via OpenSSH connection multiplexing (ControlMaster): the
+probe opens the master, every check rides it as a channel, so the whole
+audit looks like one connection to the target's sshd. PowerShell checks
+are additionally sent base64-encoded (-EncodedCommand), which removes all
+dependence on fragile remote-shell quoting (the old double-quote wrapper
+corrupted any check whose script embedded a literal `"`, e.g.
+always_install_elevated).
+
 PRIVILEGE CAVEAT — read this before trusting any output. This script
 connects as `root` (Linux) / `Administrator` (Windows), so it sees
 EVERYTHING on the guest, not what an actual unprivileged local user
@@ -101,10 +116,14 @@ design, not by attack. Do not reuse this setting against anything you
 don't fully control end-to-end.
 """
 import argparse
+import base64
 import json
+import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 
 MAX_OUTPUT_CHARS = 20000
 SSH_USER = {"Linux": "root", "Windows": "Administrator"}
@@ -117,13 +136,51 @@ SSH_OPTS = [
 ]
 
 
-def ssh_exec(target: str, os_name: str, argv: list, identity: str | None, timeout: int) -> dict:
+def _ps_encode(script: str) -> str:
+    """PowerShell -EncodedCommand payload: base64 of the UTF-16LE script.
+    The result is pure [A-Za-z0-9+/=] — no spaces, no quotes — so it
+    survives any remote-shell quoting untouched. This is the robust way
+    to carry a PowerShell script containing quotes, $vars or pipes over
+    SSH, and it is what finally fixes the always_install_elevated /
+    service_binary_paths mangling the old double-quote wrapper caused."""
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _maybe_encode_powershell(argv: list) -> list:
+    """Rewrite `powershell … -Command <script>` to
+    `powershell … -EncodedCommand <base64>`. cmd.exe checks and any
+    non-PowerShell argv are returned unchanged. Returns a NEW list; the
+    caller's argv (used for the human-readable `command` field in the
+    finding) is left intact."""
+    if argv and argv[0] in ("powershell", "pwsh") and "-Command" in argv:
+        i = argv.index("-Command")
+        script = argv[i + 1] if i + 1 < len(argv) else ""
+        # Suppress PowerShell's progress stream ("Preparing modules for first
+        # use"), which over SSH is serialized as CLIXML onto stderr and would
+        # otherwise be merged into the finding output. The real command output
+        # is unaffected; genuine error records still surface.
+        script = "$ProgressPreference='SilentlyContinue'; " + script
+        return argv[:i] + ["-EncodedCommand", _ps_encode(script)]
+    return argv
+
+
+def ssh_exec(target: str, os_name: str, argv: list, identity: str | None,
+             timeout: int, control_path: str | None = None) -> dict:
     """Runs argv on `target` over SSH as root (Linux) / Administrator
     (Windows). Returns {"exitcode", "stdout", "stderr"} — the same
     shape the old guest-agent exec call returned, so the rest of this
     script didn't need to change. Raises RuntimeError if SSH itself
     couldn't connect or authenticate (distinct from the remote COMMAND
     failing, which is a normal per-check result, not an error here).
+
+    When `control_path` is set, every call for one host shares a single
+    SSH connection (OpenSSH ControlMaster multiplexing): the first call
+    opens the master, the rest ride it as channels — no new
+    TCP/auth/banner handshake per check. That is what stops an N-check
+    audit from looking like an N-connection burst to the target's sshd,
+    which on Windows OpenSSH tripped an anti-brute-force throttle
+    ("Connection timed out during banner exchange") and failed the audit
+    partway through.
 
     NOTE: ssh's own convention is to exit 255 when the ssh client
     itself fails (no route, auth failure, etc.) — but a remote command
@@ -134,17 +191,24 @@ def ssh_exec(target: str, os_name: str, argv: list, identity: str | None, timeou
     """
     user = SSH_USER[os_name]
     if os_name == "Windows":
-        # Windows OpenSSH's default remote shell is cmd.exe, whose
-        # quoting rules aren't POSIX. None of WINDOWS_CHECKS below embed
-        # a literal double quote, so wrapping any multi-word argv
-        # element in double quotes is safe for the current check list —
-        # it is NOT a general cmd.exe-quoting solution; a future check
-        # containing an embedded " will need more care here.
-        remote_cmd = " ".join(f'"{a}"' if " " in a else a for a in argv)
+        # PowerShell checks go out base64-encoded (-EncodedCommand), so
+        # embedded quotes / $vars can't be corrupted by remote-shell
+        # quoting. Only the cmd.exe checks still use the simple wrapper
+        # below, and none of those embed a literal double quote.
+        send_argv = _maybe_encode_powershell(argv)
+        remote_cmd = " ".join(f'"{a}"' if " " in a else a for a in send_argv)
     else:
         remote_cmd = shlex.join(argv)
 
     ssh_argv = ["ssh"] + SSH_OPTS
+    if control_path:
+        # Reuse ONE SSH connection for every check on this host instead of
+        # a fresh handshake per check — the burst that tripped Windows
+        # OpenSSH's throttle. ControlPersist keeps the master briefly alive
+        # between calls; _close_master() tears it down at the end.
+        ssh_argv += ["-o", "ControlMaster=auto",
+                     "-o", f"ControlPath={control_path}",
+                     "-o", "ControlPersist=60s"]
     if identity:
         ssh_argv += ["-i", identity]
     ssh_argv += [f"{user}@{target}", remote_cmd]
@@ -161,6 +225,20 @@ def ssh_exec(target: str, os_name: str, argv: list, identity: str | None, timeou
             f"ssh to {user}@{target} failed at the connection/auth level (exit 255): {proc.stderr.strip()}"
         )
     return {"exitcode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+
+
+def _close_master(target: str, os_name: str, identity: str | None, control_path: str) -> None:
+    """Best-effort teardown of the shared SSH master connection. Safe to
+    call even if no master was ever established (e.g. the probe failed)."""
+    user = SSH_USER[os_name]
+    argv = ["ssh", "-o", f"ControlPath={control_path}"]
+    if identity:
+        argv += ["-i", identity]
+    argv += ["-O", "exit", f"{user}@{target}"]
+    try:
+        subprocess.run(argv, capture_output=True, text=True, timeout=15)
+    except Exception:
+        pass
 
 
 # (category, argv, human-readable description of what this is looking for)
@@ -193,6 +271,19 @@ LINUX_CHECKS = [
     ("sudoers",
      ["sh", "-c", "cat /etc/sudoers 2>/dev/null; cat /etc/sudoers.d/* 2>/dev/null"],
      "sudo rules — especially NOPASSWD or overly broad command grants"),
+    ("privileged_group_members",
+     ["sh", "-c",
+      'for g in docker lxd lxc disk shadow; do '
+      'line=$(getent group "$g" 2>/dev/null) || continue; '
+      'members=${line##*:}; '
+      '[ -n "$members" ] && printf "%s: %s\\n" "$g" "$members"; done'],
+     "membership in root-equivalent groups (docker/lxd/lxc/disk/shadow) — each non-root "
+     "member can typically escalate to root WITHOUT sudo and independent of any sudoers "
+     "policy (mount the host fs via a container, raw block-device access, or read "
+     "/etc/shadow). Found necessary for real: on one host the cloud-init default account "
+     "had its NOPASSWD sudo grant removed and marked closed, while its docker-group "
+     "membership — a second, equivalent root path the PoC itself had noted — went "
+     "untracked because docker.service is inventory, not a risk finding."),
     ("sensitive_file_perms",
      ["ls", "-la", "/etc/shadow", "/etc/passwd", "/etc/sudoers", "/etc/ssh/sshd_config"],
      "permissions on security-sensitive files (contents not read for /etc/shadow — perms only)"),
@@ -301,6 +392,26 @@ def split_cron_user(output: str) -> list[str]:
     return items
 
 
+def split_group_members(output: str) -> list[str]:
+    """One finding per (dangerous group, member). The check prints one
+    'group: m1,m2,...' line per non-empty root-equivalent group; expand to
+    one item per member so each membership is independently actionable
+    (its own finding_id, its own remediation = remove that user from that
+    group). `root` is skipped — root already being in a root group is not
+    a finding."""
+    items = []
+    for l in _nonblank(output.splitlines()):
+        group, sep, members = l.partition(":")
+        if not sep:
+            continue
+        group = group.strip()
+        for m in members.split(","):
+            m = m.strip()
+            if m and m != "root":
+                items.append(f"{group}: {m}")
+    return items
+
+
 def split_systemctl_units(output: str) -> list[str]:
     """One finding per unit line from `systemctl list-units` — keeps
     only lines whose first token looks like a real unit name
@@ -359,7 +470,7 @@ RISK_CATEGORIES = {
     # user could try to turn into elevated access.
     "suid_binaries", "sgid_binaries",
     "world_writable_files", "world_writable_dirs",
-    "sudoers", "cron_system", "cron_user",
+    "sudoers", "privileged_group_members", "cron_system", "cron_user",
     # Windows
     "service_binary_paths",       # unquoted/writable service paths
     "always_install_elevated",    # any user can install an MSI as SYSTEM
@@ -384,6 +495,7 @@ SPLITTERS = {
     "world_writable_files": split_find_paths,
     "world_writable_dirs": split_find_paths,
     "sudoers": split_sudoers,
+    "privileged_group_members": split_group_members,
     "listening_sockets": split_listening_sockets,
     "shell_users": split_grep_lines,
     "cron_user": split_cron_user,
@@ -415,81 +527,92 @@ def cmd_audit(args):
     checks = LINUX_CHECKS if args.os == "Linux" else WINDOWS_CHECKS
     probe_cmd = ["sh", "-c", "true"] if args.os == "Linux" else ["cmd", "/c", "ver"]
 
+    # One shared SSH connection for the whole host: the probe opens the
+    # master, every check rides it (see ssh_exec's control_path note). The
+    # try/finally guarantees the master is torn down on every exit path.
+    control_dir = tempfile.mkdtemp(prefix="range-ssh-")
+    control_path = os.path.join(control_dir, "cm.sock")
     try:
-        probe = ssh_exec(args.target, args.os, probe_cmd, args.ssh_identity, args.timeout)
-    except RuntimeError as e:
-        print(json.dumps({
-            "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
-            "errors": [
-                f"{e} — this failure does not by itself mean the host is actually unreachable; "
-                "a VM that's merely not started yet, or still booting, looks identical from here."
-            ],
-        }, indent=2))
-        return
-
-    if probe["exitcode"] != 0:
-        print(json.dumps({
-            "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
-            "errors": [f"SSH connected but the probe command failed (exitcode {probe['exitcode']}): "
-                       f"{probe['stderr']}"],
-        }, indent=2))
-        return
-
-    splitters = SPLITTERS if args.os == "Linux" else WINDOWS_SPLITTERS
-
-    findings = []
-    errors = []
-    for category, argv, description in checks:
         try:
-            result = ssh_exec(args.target, args.os, argv, args.ssh_identity, args.timeout)
+            probe = ssh_exec(args.target, args.os, probe_cmd, args.ssh_identity,
+                             args.timeout, control_path)
         except RuntimeError as e:
-            errors.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            errors.append(f"{category}: unexpected error: {e}")
-            continue
+            print(json.dumps({
+                "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
+                "errors": [
+                    f"{e} — this failure does not by itself mean the host is actually unreachable; "
+                    "a VM that's merely not started yet, or still booting, looks identical from here."
+                ],
+            }, indent=2))
+            return
 
-        output, truncated = truncate(result["stdout"] + result["stderr"])
+        if probe["exitcode"] != 0:
+            print(json.dumps({
+                "working_vmid": args.working_vmid, "reachable": False, "os": args.os, "findings": [],
+                "errors": [f"SSH connected but the probe command failed (exitcode {probe['exitcode']}): "
+                           f"{probe['stderr']}"],
+            }, indent=2))
+            return
 
-        items = []
-        splitter = splitters.get(category)
-        if splitter:
+        splitters = SPLITTERS if args.os == "Linux" else WINDOWS_SPLITTERS
+
+        findings = []
+        errors = []
+        for category, argv, description in checks:
             try:
-                items = splitter(output)
+                result = ssh_exec(args.target, args.os, argv, args.ssh_identity,
+                                  args.timeout, control_path)
+            except RuntimeError as e:
+                errors.append(f"{category}: {e}")
+                continue
             except Exception as e:
-                errors.append(f"{category}: splitter failed ({e}) — falling back to one bundled finding")
-                items = []
+                errors.append(f"{category}: unexpected error: {e}")
+                continue
 
-        kind = finding_kind(category)
-        if items:
-            for item_text in items:
-                item_display, item_truncated = truncate(item_text)
+            output, truncated = truncate(result["stdout"] + result["stderr"])
+
+            items = []
+            splitter = splitters.get(category)
+            if splitter:
+                try:
+                    items = splitter(output)
+                except Exception as e:
+                    errors.append(f"{category}: splitter failed ({e}) — falling back to one bundled finding")
+                    items = []
+
+            kind = finding_kind(category)
+            if items:
+                for item_text in items:
+                    item_display, item_truncated = truncate(item_text)
+                    findings.append({
+                        "category": category,
+                        "kind": kind,
+                        "description": description,
+                        "command": " ".join(argv),
+                        "exit_code": result["exitcode"],
+                        "output": item_display,
+                        "item": item_text,
+                        "truncated": item_truncated,
+                    })
+            else:
                 findings.append({
                     "category": category,
                     "kind": kind,
                     "description": description,
                     "command": " ".join(argv),
                     "exit_code": result["exitcode"],
-                    "output": item_display,
-                    "item": item_text,
-                    "truncated": item_truncated,
+                    "output": output,
+                    "item": None,
+                    "truncated": truncated,
                 })
-        else:
-            findings.append({
-                "category": category,
-                "kind": kind,
-                "description": description,
-                "command": " ".join(argv),
-                "exit_code": result["exitcode"],
-                "output": output,
-                "item": None,
-                "truncated": truncated,
-            })
 
-    print(json.dumps({
-        "working_vmid": args.working_vmid, "reachable": True, "os": args.os,
-        "findings": findings, "errors": errors,
-    }, indent=2))
+        print(json.dumps({
+            "working_vmid": args.working_vmid, "reachable": True, "os": args.os,
+            "findings": findings, "errors": errors,
+        }, indent=2))
+    finally:
+        _close_master(args.target, args.os, args.ssh_identity, control_path)
+        shutil.rmtree(control_dir, ignore_errors=True)
 
 
 def main():

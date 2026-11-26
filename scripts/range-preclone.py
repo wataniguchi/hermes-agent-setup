@@ -17,11 +17,13 @@ WHAT IT DOES, every --interval seconds:
   2. Candidates = hosts still `network_scan_status: not_started`, in state
      (= hosts.json) order — the order `next` hands them out. Working vmid =
      golden vmid + --offset (500: 9110 -> 9610, 9207 -> 9707).
-  3. If ANY candidate's working clone already exists (pre-cloned earlier,
-     or cloned by the agent and not yet recorded), there's already a clone
-     waiting: do nothing. At most ONE waiting clone, so it never hoards
-     `hot-ssd` space.
-  4. Otherwise take the first candidate the agent hasn't claimed, check
+  3. Count how many candidates' working clones already exist (pre-cloned
+     earlier, or cloned by the agent and not yet recorded). Keep up to
+     --max-ready of them waiting (default 2) so a short assessment feeding a
+     long clone doesn't stall the agent; if the buffer is full, or a clone is
+     already in flight, do nothing. The capacity gate below is the hard
+     ceiling, so a run of big clones self-limits and never hoards `hot-ssd`.
+  4. Otherwise take the first not-yet-cloned candidate the agent hasn't claimed, check
      capacity (bridge GET /storage/<storage>/status?template_vmid=...), and
      clone it through the bridge's POST /vm/clone — so the golden-MAC
      restore, the `pristine` snapshot, the capacity limits and the
@@ -115,7 +117,16 @@ def one_round(args) -> str:
         log("no not_started hosts left — nothing more to pre-clone, exiting")
         return "done"
 
-    # One waiting clone at most: if any candidate's working clone exists, stop here.
+    # Keep a small READY BUFFER (--max-ready), not just one. Capacity
+    # permitting, getting two hosts ahead covers a short assessment feeding a
+    # long (Windows) clone without stalling the agent — the depth-1 case that
+    # left the slot idle for 25 min at the Linux->Windows boundary. We still
+    # run at most one clone at a time: if any clone is in flight we wait (the
+    # bridge would 409 anyway), and the per-clone capacity gate (507 /
+    # ok_to_clone) remains the hard ceiling, so a run of big Windows clones
+    # self-limits long before it can hoard hot-ssd.
+    ready = 0
+    have_clone = set()
     for vmid, rec in candidates:
         wv = int(vmid) + args.offset
         code, st = bridge("GET", args.bridge, f"/vm/{wv}/status")
@@ -123,13 +134,22 @@ def one_round(args) -> str:
             log(f"bridge status check for {wv} failed ({code}: {detail(st)}) — waiting")
             return "wait"
         if st.get("exists"):
-            what = "being cloned" if st.get("clone_in_progress") or st.get("lock") else \
-                   ("ready, waiting for the agent" if st.get("ready_to_start") else st.get("status"))
-            log(f"{rec['host']} ({vmid}) already has working clone {wv} ({what}) — nothing to do")
-            return "wait"
+            have_clone.add(vmid)
+            if st.get("clone_in_progress") or st.get("lock"):
+                log(f"{rec['host']} ({vmid}) working clone {wv} is still cloning — "
+                    f"one clone at a time, waiting")
+                return "wait"
+            ready += 1
+    if ready >= args.max_ready:
+        log(f"{ready} working clone(s) ready (buffer full at max-ready={args.max_ready}) "
+            f"— nothing to do")
+        return "wait"
 
-    # First candidate the agent hasn't claimed (a claimed host is the agent's to clone).
+    # First not-yet-cloned candidate the agent hasn't claimed (a claimed host
+    # is the agent's to clone; an already-buffered one we skip).
     for vmid, rec in candidates:
+        if vmid in have_clone:
+            continue
         claim = claims.get(f"{vmid}:host")
         if claim and now - claim.get("claimed_at", 0) < CLAIM_LEASE_SECONDS:
             log(f"{rec['host']} ({vmid}) is claimed by {claim.get('claimant')} — leaving it to the agent")
@@ -167,7 +187,7 @@ def one_round(args) -> str:
                 f"check it with GET /vm/{wv}/status before anything else")
         return "wait"
 
-    log("every not_started host is claimed by the agent — nothing to pre-clone")
+    log("every not_started host is already buffered or claimed by the agent — nothing to pre-clone")
     return "wait"
 
 
@@ -177,6 +197,9 @@ def main():
     p.add_argument("--bridge", default="http://127.0.0.1:8811")
     p.add_argument("--storage", default="hot-ssd")
     p.add_argument("--offset", type=int, default=500, help="working vmid = golden vmid + offset")
+    p.add_argument("--max-ready", type=int, default=2,
+                   help="how many working clones to keep ready ahead of the agent "
+                        "(capacity-gated; 1 restores the old one-at-a-time behaviour)")
     p.add_argument("--interval", type=int, default=300, help="seconds between rounds")
     p.add_argument("--once", action="store_true", help="run a single round and exit")
     p.add_argument("--dry-run", action="store_true", help="report what would be cloned; clone nothing")
@@ -190,7 +213,8 @@ def main():
     signal.signal(signal.SIGTERM, _on_term)
 
     log(f"range-preclone: workspace={args.workspace} bridge={args.bridge} storage={args.storage} "
-        f"offset=+{args.offset} interval={args.interval}s{' DRY-RUN' if args.dry_run else ''}")
+        f"offset=+{args.offset} max-ready={args.max_ready} interval={args.interval}s"
+        f"{' DRY-RUN' if args.dry_run else ''}")
     try:
         while True:
             try:

@@ -92,14 +92,20 @@ burns turns.
   `attempts_remaining` for this finding. Read those fields; never grep
   the source for the numbers.
 
-**One report per finding is the normal case.** Make your best real
-attempt, report the result (`true` / `false` / `inconclusive`), and move
-on. The 3-report budget is headroom for a genuinely promising lead that
-needs a second or third refinement — it is NOT a quota to spend on every
-finding. Rigor lives in the quality of the one attempt you do make, not
-in the number of attempts. A finding you've honestly shown is
-`not_reachable` on the first try is done; do not re-report it to use up
-the budget.
+**Match your persistence to the lead.** For a network service, a single
+probe is rarely the end of the story. If the service is live and
+responding but you haven't yet reproduced a compromise, that unproven
+lead is exactly what the 3-report budget is for: come back and refine — a
+different endpoint, auth path, parameter, or payload — before you record
+`not_reachable` on a shallow first look. A web app especially almost
+never gives up its real exposure to two curls; if you've confirmed the
+app is there, keep pulling the thread (routes, client-side auth, tokens
+in traffic, request tampering) rather than closing it out. A finding is
+`false` or `inconclusive` when you've genuinely driven at it and it
+resists, not when you've only ruled out your first idea. Depth on a
+promising finding beats breadth across many. The one thing the budget is
+NOT for is re-reporting a condition you've already honestly shown to be
+inert — that adds nothing; stop there.
 
 ## Reporting your result
 
