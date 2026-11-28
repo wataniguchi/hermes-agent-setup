@@ -40,12 +40,12 @@ PROVEN_STATUSES = [
 ]
 
 STATUS_BLURB = {
-    "poc_confirmed": "proven, no remediation yet",
-    "remediation_planned": "remediation attempted, not applied",
-    "remediation_applied": "fixed, reverify not yet run",
-    "reverified_closed": "fixed & re-verified closed",
-    "reverify_failed": "fix applied but STILL exploitable",
-    "reverify_inconclusive": "fixed, reverify couldn't confirm",
+    "poc_confirmed": "proven exploitable, no remediation proposed yet",
+    "remediation_planned": "remediation proposed, not proven (untested / couldn't apply)",
+    "remediation_applied": "fix applied on clone, re-verify not yet run",
+    "reverified_closed": "fix proven effective on clone (re-verified)",
+    "reverify_failed": "fix tried on clone but did NOT close it",
+    "reverify_inconclusive": "fix applied on clone, re-verify inconclusive",
     "risk_accepted": "operator accepted the risk",
     "closed_manually": "operator closed by hand",
 }
@@ -75,6 +75,7 @@ def collect(state: dict):
                     "category": finding.get("category") or finding.get("scope"),
                     "scope": finding.get("scope"),
                     "desc": finding_short_desc(finding),
+                    "needs_operator_decision": bool(finding.get("needs_operator_decision")),
                 })
     return rows
 
@@ -83,6 +84,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--workspace", default="/workspace")
     p.add_argument("--status", choices=PROVEN_STATUSES, help="show only this one status")
+    p.add_argument("--needs-decision", action="store_true",
+                   help="show only findings flagged needs_operator_decision "
+                        "(deploying the proven fix is a conscious operator call)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
@@ -97,6 +101,8 @@ def main():
     rows = collect(state)
     if args.status:
         rows = [r for r in rows if r["status"] == args.status]
+    if args.needs_decision:
+        rows = [r for r in rows if r["needs_operator_decision"]]
 
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -106,6 +112,10 @@ def main():
     print("=== Proven vulnerabilities ===")
     print(f"Workspace: {args.workspace}")
     print(f"Total proven: {len(rows)}")
+    print("Note: none of these have been applied beyond the disposable clone they were")
+    print("proven on — each is a proven, ready-to-deploy fix; deploying it is the")
+    print("operator's decision.  ⚑ = that deployment is a conscious operator call")
+    print("(needs_operator_decision).")
     print("Summary by status:")
     for st in wanted:
         print(f"  {st:<24} {sum(1 for r in rows if r['status'] == st)}")
@@ -117,7 +127,8 @@ def main():
         print(f"\n-- {st}  ({STATUS_BLURB[st]})  [{len(group)}] --")
         # golden vmid | host | category | finding id | short desc
         for r in sorted(group, key=lambda r: (r["golden_vmid"], r["finding_id"])):
-            print(f"  {r['golden_vmid']}  {r['host']:<16} {str(r['category']):<20} "
+            flag = "⚑ " if r["needs_operator_decision"] else "  "
+            print(f"  {flag}{r['golden_vmid']}  {r['host']:<16} {str(r['category']):<20} "
                   f"{r['finding_id']}  {r['desc']}")
         print("  → inspect any of the above:")
         print(f"      python3 range-vuln-show.py --workspace <ws> "

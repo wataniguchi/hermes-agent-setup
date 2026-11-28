@@ -41,6 +41,31 @@ is closed.
   in `hosts.json`'s per-host `note` field before it's treated as just
   another range host.
 
+## The bridge (`proxmox_bridge.py`) — the endpoints you use
+
+The bridge manages VM **lifecycle only**. These are all the endpoints you
+need — call them directly; do NOT fetch `/openapi.json` or probe for other
+paths:
+
+- `POST /vm/clone` — clone a golden to its working vmid (golden + 500)
+- `POST /vm/<vmid>/start` · `POST /vm/<vmid>/stop` · `DELETE /vm/<vmid>`
+- `GET  /vm/<vmid>/status` — `exists`/`status`/`lock`/`clone_in_progress`/`ready_to_start`
+- `GET  /storage/hot-ssd/status?template_vmid=<golden>` — capacity before a clone
+- `POST /vm/<vmid>/snapshot` · `POST /vm/<vmid>/rollback?snapname=pristine&start=true`
+
+A POST that carries a JSON body (`/vm/clone`, `/vm/<vmid>/snapshot`) **must**
+send `-H 'Content-Type: application/json'` — without it the bridge rejects the
+body with `422 "Input should be a valid dictionary"`. `start`/`stop`/`DELETE`
+and `rollback` take no body (rollback uses query params), so they don't need it.
+
+**The bridge runs NOTHING inside a guest — there is no guest-exec.** The
+golden images have no QEMU guest agent, so `POST /vm/<vmid>/exec` always
+returns `500 "No QEMU guest agent configured"`. Everything that runs a
+command inside a host — both scans, the audit, every PoC and remediation —
+goes over **SSH** (the sandbox's authorized keypair, as
+`root`/`Administrator`). Never reach for a bridge exec call, and never grep
+a script's source to re-learn this. (REFERENCE.md: ssh-not-guest-exec)
+
 ## Two scan phases, and which findings become work
 
 Every host gets BOTH scans:
@@ -87,7 +112,7 @@ tell).
 ```
 # 1. Clone + start the working image (proxmox_bridge.py, not this skill).
 #    Start ONLY after the clone call returns 200 — see "Cloning" below.
-curl -X POST http://host.docker.internal:8811/vm/clone -d '{"template_vmid": 9001, "new_vmid": 1234, "name": "example-linux-host-ctf"}'
+curl -X POST http://host.docker.internal:8811/vm/clone -H 'Content-Type: application/json' -d '{"template_vmid": 9001, "new_vmid": 1234, "name": "example-linux-host-ctf"}'
 curl -X POST http://host.docker.internal:8811/vm/1234/start
 
 # 2. Scan it — network, then local
@@ -232,9 +257,11 @@ parallel-clone-burst, early-start-wrong-mac.
      writes `scan_failed`, undoable only by an operator `reset-host`.
 5. **Your host's working clone may already exist — check before cloning.**
    A working clone is always vmid **golden + 500** (9110 → 9610) named
-   `<host>-ctf`. The operator may run a pre-clone helper
-   (`scripts/range-preclone.py`), or you may have cloned it earlier and
-   not recorded it. On a `clone_and_scan`, first `GET
+   `<host>-ctf`. Clone only the host `next` just handed you — getting the
+   *next* host ready ahead of time is the pre-clone helper's
+   (`scripts/range-preclone.py`) job, not yours. The operator may run that
+   helper, or you may have cloned your current host earlier and not
+   recorded it. On a `clone_and_scan`, first `GET
    /vm/<golden+500>/status`:
    - `exists: false` → clone it (capacity check first, below).
    - `ready_to_start: true` → a finished clone with the golden MAC and a
@@ -274,9 +301,7 @@ rules:
    recheck. The bridge enforces the same limits: `/vm/clone` returns `507`
    at ≥75% used or >95% projected — "free space first", never "retry". If
    every finished clone is already gone and it still says no, stop and
-   report it. The full endpoint list is `GET
-   http://host.docker.internal:8811/openapi.json` — read it rather than
-   guessing paths.
+   report it.
 
 ## Recovering a working clone
 

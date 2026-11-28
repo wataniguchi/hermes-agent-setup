@@ -195,18 +195,24 @@ def main():
     hr("4. REVERIFICATION (did the fix actually close it)")
     status = finding.get("status")
     verdict = {
-        "reverified_closed": "CLOSED — reverify re-ran the original method and it no longer works.",
-        "reverify_failed": "FAILED — the fix was applied but the finding is STILL exploitable.",
-        "reverify_inconclusive": "INCONCLUSIVE — reverify could not determine the outcome.",
-        "remediation_applied": "PENDING — a fix is applied but reverify has not run yet.",
-        "remediation_planned": "NOT REACHED — remediation hasn't been successfully applied yet.",
-        "poc_confirmed": "NOT REACHED — proven exploitable, no remediation attempted yet.",
+        "reverified_closed": "FIX PROVEN ON CLONE — reverify re-ran the original method and it "
+                             "no longer works. The remediation is proven effective and ready to "
+                             "deploy; deploying it is the operator's decision.",
+        "reverify_failed": "FAILED — the fix was tried on the clone but the finding is STILL exploitable.",
+        "reverify_inconclusive": "INCONCLUSIVE — the fix was applied on the clone but reverify could not confirm the outcome.",
+        "remediation_applied": "PENDING — a fix is applied on the clone but reverify has not run yet.",
+        "remediation_planned": "NOT PROVEN — a remediation was proposed but not proven to work (untested, or it couldn't apply).",
+        "poc_confirmed": "NOT REACHED — proven exploitable, no remediation proposed yet.",
         "risk_accepted": "N/A — operator accepted the risk via resolve-review.",
         "closed_manually": "N/A — operator closed this by hand via resolve-review.",
     }.get(status, f"(status {status})")
     kv("Verdict", verdict)
     print("  (reverify re-runs range_poc.py with --reverify and appends to the PoC attempt")
-    print("   log above; a `reachable: false` later attempt is the closed proof.)")
+    print("   log above; a `reachable: false` later attempt is the closed proof. Nothing here")
+    print("   is applied beyond the disposable clone — a proven fix is ready to deploy, not deployed.)")
+    if finding.get("needs_operator_decision"):
+        print("  ⚑ needs_operator_decision: deploying this fix is flagged as a conscious operator")
+        print("    call — it changes intended design, or has consequences you must weigh first.")
 
     # ---- Operator review ----
     review = [r for r in rec.get("review_log", []) if r.get("finding_id") == fid]

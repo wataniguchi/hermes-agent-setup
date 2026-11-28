@@ -35,7 +35,7 @@ to open a brand-new SSH connection for the probe and for every check — on
 Windows that's ~9 fresh TCP/auth/banner handshakes in a tight loop, which
 tripped Windows OpenSSH's anti-brute-force throttle ("Connection timed out
 during banner exchange") and failed the local audit of at least one host
-(mail-beg) partway through, leaving it `audit_failed` even though it was
+partway through, leaving it `audit_failed` even though it was
 reachable and had no real local findings. The checks now share a SINGLE
 SSH connection via OpenSSH connection multiplexing (ControlMaster): the
 probe opens the master, every check rides it as a channel, so the whole

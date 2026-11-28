@@ -58,6 +58,33 @@ only when you actually moved from a lower-privilege position to a higher
 one (or to data you shouldn't reach) **through this finding**, with the
 proof. If you tried and genuinely couldn't tell, that's `inconclusive`.
 
+### You connect as root — ADOPT the unprivileged account, don't authenticate as it
+
+Many findings are gated behind a specific unprivileged account (a sudoers
+`NOPASSWD` grant for `blue`/`gt`/a service account, a cron job that runs as
+some user, a group membership). You are connected as **root**, so you
+**adopt** that account directly — `runuser -u <acct> -- <cmd>` or
+`su - <acct> -c '<cmd>'` — and you do **NOT** need its password or SSH key:
+root switches to any identity without authenticating.
+
+A **locked password** (`!!` or `*` in `/etc/shadow`) does NOT change this,
+and does NOT block that account's own `sudo`: `sudo` evaluates the sudoers
+policy, not `/etc/shadow`, so a `NOPASSWD` grant runs even for a
+password-locked account. (Control test if you ever doubt it: a throwaway
+`!!`-locked account with a live `NOPASSWD: ALL` grant still runs
+`runuser -u <acct> -- sudo -n id` → `uid=0(root)`.)
+
+So **never** record `inconclusive`/`not_reachable` on the grounds that an
+account's password is locked, that you "hold no credential" for it, or that
+only an operator key can log in as it — **that is not the test.** The range's
+premise is that a low-privilege foothold already exists; demonstrate what it
+**escalates to**, not how a foothold would be obtained. For a `NOPASSWD`
+sudoers finding on account `X`, the PoC is literally
+`runuser -u X -- sudo -n id` → `uid=0(root)` captured in `evidence`. If you
+find yourself writing "reachable only from a locked account I can't log into
+as," you have skipped the actual test — run the `runuser`/`su` demonstration
+instead.
+
 ## Task
 
 Determine whether this specific local condition is genuinely exploitable

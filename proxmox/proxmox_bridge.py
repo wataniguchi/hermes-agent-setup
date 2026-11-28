@@ -494,8 +494,8 @@ def clone_vm(req: CloneRequest):
     #   - most hosts get their address from range-gw's dnsmasq static
     #     reservations (range-gw/dnsmasq.d/range.conf), keyed to each golden
     #     image's OWN original MAC — a regenerated MAC gets no reservation;
-    #   - some hosts (e.g. beg-rtu-host) are addressed statically inside the
-    #     guest (systemd-networkd) instead; the same rule applies — keep the
+    #   - some hosts are addressed statically inside the guest
+    #     (systemd-networkd) instead; the same rule applies — keep the
     #     golden MAC and the clone behaves exactly as the verified golden did.
     # A guest network config pinned to the MAC (NetworkManager HWADDR/
     # mac-address=, networkd [Match] MACAddress=) can also leave the NIC

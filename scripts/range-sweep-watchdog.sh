@@ -55,9 +55,7 @@
 #     critical path; the agent finds it ready and starts it (SKILL.md's
 #     Cloning rule 5). Read-only on state, never more than one waiting
 #     clone, capacity-checked, and the bridge's one-clone-at-a-time guard
-#     keeps it from ever cloning alongside the agent. Confirmed on
-#     2026-11-24: pre-cloned mail-beg (34.8 min) and sp-int-baf (22.6 min)
-#     entirely while the agent worked other hosts. It exits on its own
+#     keeps it from ever cloning alongside the agent. It exits on its own
 #     once no not_started hosts remain; cleanup() stops it otherwise. Its
 #     output goes to workspace/.range-preclone.log.
 #   - Teardown on graceful completion: when is-done confirms the sweep is

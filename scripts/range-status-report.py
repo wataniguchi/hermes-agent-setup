@@ -287,9 +287,24 @@ def build_report(workspace: str) -> dict:
     NEEDS_ATTENTION_STATUSES = {"poc_confirmed", "remediation_planned", "reverify_failed"}
     sc = status_counts
     proven_total = sum(sc.get(s, 0) for s in PROVEN_STATUSES)
+    # Second axis — needs_operator_decision over PROVEN findings, crossed with
+    # "is the fix proven effective?" (reverified_closed). This is the operator's
+    # three-tier deployment-decision view (axis 1 = is there a proven fix,
+    # axis 2 = does deploying it need a conscious human call).
+    decision = {"proven_flagged": 0, "proven_unflagged": 0,
+                "unproven_flagged": 0, "unproven_unflagged": 0}
+    for _, _, _, finding in all_findings:
+        st = finding.get("status")
+        if st not in PROVEN_STATUSES:
+            continue
+        flagged = bool(finding.get("needs_operator_decision"))
+        proven_fix = st == "reverified_closed"
+        decision[("proven" if proven_fix else "unproven")
+                 + ("_flagged" if flagged else "_unflagged")] += 1
     vulnerabilities = {
         "proven_total": proven_total,
         "proven_by_status": {s: sc.get(s, 0) for s in PROVEN_STATUSES},
+        "by_decision": decision,
         "fix_applied": sum(sc.get(s, 0) for s in FIX_APPLIED_STATUSES),
         "verified_closed": sc.get("reverified_closed", 0),
         "needs_attention": sum(sc.get(s, 0) for s in NEEDS_ATTENTION_STATUSES),
@@ -474,21 +489,31 @@ def print_human_report(report: dict):
     print("\n-- Vulnerability funnel --")
     print("   (PROVEN exploitable findings only — informational inventory and")
     print("    not-reachable findings are NOT vulnerabilities; see README)")
+    print("   Note: 'closed'/'applied' below means on the disposable clone, NOT on any")
+    print("   live host — each is a proven, ready-to-deploy fix; deploying it is the")
+    print("   operator's decision.")
     line("Proven vulnerabilities", v["proven_total"])
-    print(f"      {'reverified_closed':<30} {pb['reverified_closed']:>4}   fixed & re-verified closed")
-    print(f"      {'remediation_applied':<30} {pb['remediation_applied']:>4}   fixed, reverify not yet run")
-    print(f"      {'reverify_inconclusive':<30} {pb['reverify_inconclusive']:>4}   fixed, reverify couldn't confirm")
-    print(f"      {'reverify_failed':<30} {pb['reverify_failed']:>4}   fix applied but STILL exploitable")
-    print(f"      {'remediation_planned':<30} {pb['remediation_planned']:>4}   remediation attempted, not applied")
-    print(f"      {'poc_confirmed':<30} {pb['poc_confirmed']:>4}   proven, no remediation yet")
+    print(f"      {'reverified_closed':<30} {pb['reverified_closed']:>4}   fix proven effective on clone (re-verified)")
+    print(f"      {'remediation_applied':<30} {pb['remediation_applied']:>4}   fix applied on clone, re-verify not yet run")
+    print(f"      {'reverify_inconclusive':<30} {pb['reverify_inconclusive']:>4}   fix applied on clone, re-verify inconclusive")
+    print(f"      {'reverify_failed':<30} {pb['reverify_failed']:>4}   fix tried on clone but did NOT close it")
+    print(f"      {'remediation_planned':<30} {pb['remediation_planned']:>4}   remediation proposed, not proven")
+    print(f"      {'poc_confirmed':<30} {pb['poc_confirmed']:>4}   proven, no remediation proposed yet")
     print(f"      {'closed_manually':<30} {pb['closed_manually']:>4}   operator closed by hand")
     print(f"      {'risk_accepted':<30} {pb['risk_accepted']:>4}   operator accepted the risk")
     total = v["proven_total"]
     pct = lambda n: f"{n}/{total}" + (f" ({round(100*n/total)}%)" if total else "")
     print("   Remediation coverage of proven vulns:")
-    line("  Fix applied", pct(v["fix_applied"]))
-    line("  Verified closed", pct(v["verified_closed"]))
+    line("  Fix tested on clone", pct(v["fix_applied"]))
+    line("  Fix proven effective", pct(v["verified_closed"]))
     line("  Needs attention", f"{v['needs_attention']}   (poc_confirmed / remediation_planned / reverify_failed)")
+    bd = v["by_decision"]
+    print("   Deployment decision — 2nd axis (⚑ = applying the fix is the operator's call):")
+    print(f"      ⚑ proven fix, operator-decision     {bd['proven_flagged']:>4}   reverified_closed + flagged")
+    print(f"      ⚑ no proven fix yet, operator-dec.  {bd['unproven_flagged']:>4}   proposed/other + flagged")
+    print(f"        proven fix, AI-judged routine     {bd['proven_unflagged']:>4}   reverified_closed, not flagged")
+    if bd["unproven_unflagged"]:
+        print(f"        no proven fix, not flagged        {bd['unproven_unflagged']:>4}   fix attempt failed")
     c = v["context"]
     print("   For context (NOT vulnerabilities):")
     print(f"      {'poc_not_reachable':<30} {c['poc_not_reachable']:>4}   tested, not exploitable")

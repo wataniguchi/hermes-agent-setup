@@ -191,13 +191,9 @@ def context_path(vmid: str, finding_id_: str, kind: str) -> str:
     # vmid-scoped on purpose: finding_id is a hash of (scope, port, proto,
     # service) or (scope, category, command) ALONE — never host or vmid —
     # so two unrelated findings on different hosts can share the identical
-    # ID (confirmed for real: 9102's benign nginx redirect and 9103's
-    # critical hr-news RCE both landed f-3b4c7dfc21). Before this fix, this
-    # filename had no vmid in it at all, so whichever host's assign-poc/
-    # assign-remediate ran LAST silently overwrote the other's context —
-    # confirmed for real when 9102's nginx context was clobbered by 9103's
-    # Apache one on disk, during the same real 3-host run that surfaced the
-    # collision in the first place.
+    # ID. Before this fix, this filename had no vmid in it at all, so
+    # whichever host's assign-poc/assign-remediate ran LAST silently
+    # overwrote the other's context.
     return os.path.join(CONTEXT_DIR, f".range_context_{vmid}_{finding_id_}_{kind}.json")
 
 
